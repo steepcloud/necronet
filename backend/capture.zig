@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const common = @import("common");
 
 const c = @cImport({
-    @cInclude("pcap.h");
+    @cInclude("pcap_wrapper.h");
 });
 
 pub const Error = error{
@@ -104,7 +104,7 @@ pub const CaptureSession = struct {
         }
         
         // Parse basic packet info (for IPv4 packets)
-        return parsePacketInfo(header.?, packet.?);
+        return parsePacketInfo((header.?).*, @as([*]const u8, @ptrCast(packet.?)));
     }
 };
 
@@ -123,14 +123,16 @@ pub fn getInterfaces(allocator: Allocator) ![]Interface {
     errdefer interface_list.deinit();
     
     var current_dev = dev_list;
-    while (current_dev != null) : (current_dev = current_dev.?.next) {
-        const dev = current_dev.?;
+    while (current_dev != null) : (current_dev = current_dev.*.next) {
+        const dev = current_dev.*;
+        if (dev.name == null) continue;
         const name = try allocator.dupe(u8, std.mem.span(dev.name));
         errdefer allocator.free(name);
         
         var description: ?[]u8 = null;
         if (dev.description != null) {
             description = try allocator.dupe(u8, std.mem.span(dev.description));
+            errdefer if (description) |d| allocator.free(d);
         }
         
         try interface_list.append(Interface{
