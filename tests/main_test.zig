@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const backend = @import("backend");
 const common = @import("common");
+const test_bnd_capture = @import("test_bnd_capture.zig");
 
 test "basic test" {
     try testing.expect(true);
