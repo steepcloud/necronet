@@ -1,0 +1,15 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Dependencies
+deps/
+
+#  Editor files
+*.swp
+*~
+.vscode/
+idea/
+
+npcap-sdk-1.15/
