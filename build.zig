@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
     const backend_module = b.createModule(.{
         .root_source_file = b.path("backend/capture.zig"),
     });
+    backend_module.addIncludePath(b.path("."));
+
+    if (target.result.os.tag == .windows) {
+        backend_module.addIncludePath(b.path("npcap-sdk-1.15/Include"));
+    }
 
     const ipc_module = b.createModule(.{
         .root_source_file = b.path("ipc/ipc.zig"),
@@ -35,6 +40,7 @@ pub fn build(b: *std.Build) void {
 
     // link with libpcap (Npcap on Windows)
     if (target.result.os.tag == .windows) {
+        exe.addIncludePath(b.path("."));
         exe.addIncludePath(b.path("npcap-sdk-1.15/Include"));
         
         if (target.result.cpu.arch == .x86_64) {
@@ -77,6 +83,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("common", common_module);
 
     if (target.result.os.tag == .windows) {
+        unit_tests.addIncludePath(b.path("."));
         unit_tests.addIncludePath(b.path("npcap-sdk-1.15/Include"));
         if (target.result.cpu.arch == .x86_64) {
             unit_tests.addLibraryPath(b.path("npcap-sdk-1.15/Lib/x64"));
