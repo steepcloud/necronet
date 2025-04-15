@@ -33,8 +33,20 @@ pub fn main() !void {
     std.debug.print("\nSelect interface number: ", .{});
     const stdin = std.io.getStdIn().reader();
     var buf: [10]u8 = undefined;
-    const input = try stdin.readUntilDelimiterOrEof(buf[0..], '\n');
-    const selected_index = try std.fmt.parseInt(usize, std.mem.trim(u8, input.?, " \r\n\t"), 10);
+    const if_input = try stdin.readUntilDelimiterOrEof(buf[0..], '\n');
+    if (if_input == null) {
+        std.debug.print("No input received.\n", .{});
+        return;
+    }
+
+    const input = if_input.?;
+
+    const trimmed_input = std.mem.trim(u8, input, " \r\n\t");
+    if (trimmed_input.len == 0) {
+        std.debug.print("Empty input.\n", .{});
+        return;
+    }
+    const selected_index = try std.fmt.parseInt(usize, trimmed_input, 10);
 
     if (selected_index >= interfaces.len) {
         std.debug.print("Invalid selection\n", .{});
@@ -54,13 +66,21 @@ pub fn main() !void {
     defer session.deinit();
 
     // Optional: set a filter (e.g., "tcp or udp")
+    const filter = "ip";
+    std.debug.print("Applying filter: {s}\n", .{filter});
     try session.setFilter("ip");
 
     // Capture packets in a loop
     std.debug.print("Press Ctrl+C to stop capturing\n\n", .{});
     while (true) {
-        if (try session.capturePacket()) |packet| {
+        const if_packet = try session.capturePacket();
+        if (if_packet) |packet| {
+            // If a packet was captured and parsed, print its info
             printPacketInfo(packet);
+        } else {
+            // Handle timeout or non-IP packets (if filter is "ip")
+            // You could add a small sleep here if desired to prevent busy-waiting on timeout
+            // std.time.sleep(10 * std.time.ns_per_ms);
         }
     }
 }
