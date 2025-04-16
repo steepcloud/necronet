@@ -1,4 +1,5 @@
 const std = @import("std");
+const Endian = std.builtin.Endian;
 const Allocator = std.mem.Allocator;
 const common = @import("common");
 const log = std.log.scoped(.capture);
@@ -41,7 +42,8 @@ pub const EthernetHeader = extern struct {
     ether_type: u16, // Big Endian
 
     pub fn etherType(self: EthernetHeader) u16 {
-        return std.mem.readIntBig(u16, &self.ether_type);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.ether_type));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
@@ -66,7 +68,8 @@ pub const IpV4Header = extern struct {
     }
 
     pub fn totalLength(self: IpV4Header) u16 {
-        return std.mem.readIntBig(u16, &self.total_length);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.total_length));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
@@ -82,20 +85,25 @@ pub const TcpHeader = extern struct {
     // Options follow here, variable length
 
     pub fn sourcePort(self: TcpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.source_port);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.source_port));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn destPort(self: TcpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.dest_port);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.dest_port));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn sequenceNumber(self: TcpHeader) u32 {
-        return std.mem.readIntBig(u32, &self.sequence_number);
+        const ptr = @as(*const [4]u8, @ptrCast(&self.sequence_number));
+        return std.mem.readInt(u32, ptr, Endian.big);
     }
     pub fn ackNumber(self: TcpHeader) u32 {
-        return std.mem.readIntBig(u32, &self.ack_number);
+        const ptr = @as(*const [4]u8, @ptrCast(&self.ack_number));
+        return std.mem.readInt(u32, ptr, Endian.big);
     }
     // Helper to get Data Offset (header length in 32-bit words)
     pub fn dataOffset(self: TcpHeader) u4 {
-        const val = std.mem.readIntBig(u16, &self.data_offset_reserved_flags);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.data_offset_reserved_flags));
+        const val = std.mem.readInt(u16, ptr, Endian.big);
         return @intCast(val >> 12); // Top 4 bits
     }
     // Helper to get header length in bytes
@@ -104,7 +112,8 @@ pub const TcpHeader = extern struct {
     }
     // Individual flag helpers
     pub fn flags(self: TcpHeader) u9 {
-        const val = std.mem.readIntBig(u16, &self.data_offset_reserved_flags);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.data_offset_reserved_flags));
+        const val = std.mem.readInt(u16, ptr, Endian.big);
         return @intCast(val & 0x1FF); // Lower 9 bits
     }
     pub fn flagFIN(self: TcpHeader) bool { return (self.flags() & 0x001) != 0; }
@@ -118,13 +127,16 @@ pub const TcpHeader = extern struct {
     pub fn flagNS(self: TcpHeader) bool { return (self.flags() & 0x100) != 0; }
 
     pub fn windowSize(self: TcpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.window_size);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.window_size));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn getChecksum(self: TcpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.checksum);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn urgentPointer(self: TcpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.urgent_pointer);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.urgent_pointer));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
@@ -135,17 +147,21 @@ pub const UdpHeader = extern struct {
     checksum: u16, // Big Endian
 
     pub fn sourcePort(self: UdpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.source_port);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.source_port));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn destPort(self: UdpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.dest_port);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.dest_port));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     // Returns length of UDP header + UDP data
     pub fn getLength(self: UdpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.length);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.length));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
     pub fn getChecksum(self: UdpHeader) u16 {
-        return std.mem.readIntBig(u16, &self.checksum);
+        const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
+        return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
@@ -279,7 +295,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
 
     // Use @ptrCast to view the start of packet_data as an EthernetHeader
     // WARNING: Assumes sufficient alignment from pcap.
-    const eth_header = @as(*const EthernetHeader, @ptrCast(packet_data));
+    const eth_header = @as(*const EthernetHeader, @alignCast(@ptrCast(packet_data)));
 
     // Check EtherType for IPv4
     if (eth_header.etherType() != 0x0800) return null; // Not IPv4
@@ -289,7 +305,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
     if (caplen < ip_offset + @sizeOf(IpV4Header)) return null; // Basic check for fixed part
 
     const ip_header_ptr = packet_data + ip_offset;
-    const ip_header = @as(*const IpV4Header, @ptrCast(ip_header_ptr));
+    const ip_header = @as(*const IpV4Header, @alignCast(@ptrCast(ip_header_ptr)));
 
     // Validate IP header length field against captured length
     const ip_hdr_len_bytes = ip_header.headerLength();
@@ -312,7 +328,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
             // Check length for minimum TCP header (fixed part)
             if (caplen >= transport_offset + @sizeOf(TcpHeader)) {
                 const tcp_header_ptr = packet_data + transport_offset;
-                const tcp_header = @as(*const TcpHeader, @ptrCast(tcp_header_ptr));
+                const tcp_header = @as(*const TcpHeader, @alignCast(@ptrCast(tcp_header_ptr)));
 
                 // Optional: Validate TCP header length against captured length
                 const tcp_hdr_len_bytes = tcp_header.headerLength();
@@ -334,7 +350,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
             // Check length for UDP header
             if (caplen >= transport_offset + @sizeOf(UdpHeader)) {
                  const udp_header_ptr = packet_data + transport_offset;
-                 const udp_header = @as(*const UdpHeader, @ptrCast(udp_header_ptr));
+                 const udp_header = @as(*const UdpHeader, @alignCast(@ptrCast(udp_header_ptr)));
                  source_port = udp_header.sourcePort();
                  dest_port = udp_header.destPort();
                  transport_checksum = udp_header.getChecksum();
