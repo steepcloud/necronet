@@ -295,23 +295,30 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
 
     // Use @ptrCast to view the start of packet_data as an EthernetHeader
     // WARNING: Assumes sufficient alignment from pcap.
-    const eth_header = @as(*const EthernetHeader, @alignCast(@ptrCast(packet_data)));
+    var eth_header_aligned: EthernetHeader = undefined;
+    @memcpy(std.mem.asBytes(&eth_header_aligned), packet_data[0..@sizeOf(EthernetHeader)]);
+    const eth_header = &eth_header_aligned;
 
     // Check EtherType for IPv4
     if (eth_header.etherType() != 0x0800) return null; // Not IPv4
 
     // Check length for minimum IPv4 header
     const ip_offset = @sizeOf(EthernetHeader);
-    if (caplen < ip_offset + @sizeOf(IpV4Header)) return null; // Basic check for fixed part
+    if (caplen < ip_offset + @sizeOf(IpV4Header)) {
+        log.debug("Packet too short for IPv4 header (caplen: {}, required: {})", 
+                .{ caplen, ip_offset + @sizeOf(IpV4Header) });
+        return Error.InvalidPacketHeader;
+    }
 
-    const ip_header_ptr = packet_data + ip_offset;
-    const ip_header = @as(*const IpV4Header, @alignCast(@ptrCast(ip_header_ptr)));
+    var ip_header_aligned: IpV4Header = undefined;
+    @memcpy(std.mem.asBytes(&ip_header_aligned), packet_data[ip_offset..ip_offset+@sizeOf(IpV4Header)]);
+    const ip_header = &ip_header_aligned;
 
     // Validate IP header length field against captured length
     const ip_hdr_len_bytes = ip_header.headerLength();
     if (ip_hdr_len_bytes < 20 or caplen < ip_offset + ip_hdr_len_bytes) {
         // Invalid header length or packet too short for declared header length
-        log.warn("Invalid IP header length ({}) or insufficient captured data ({})", .{ ip_hdr_len_bytes, caplen });
+        log.debug("Invalid IP header length ({}) or insufficient captured data ({})", .{ ip_hdr_len_bytes, caplen });
         return Error.InvalidPacketHeader;
     }
 
@@ -327,36 +334,39 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
             protocol_type = .TCP;
             // Check length for minimum TCP header (fixed part)
             if (caplen >= transport_offset + @sizeOf(TcpHeader)) {
-                const tcp_header_ptr = packet_data + transport_offset;
-                const tcp_header = @as(*const TcpHeader, @alignCast(@ptrCast(tcp_header_ptr)));
+                var tcp_header_aligned: TcpHeader = undefined;
+                @memcpy(std.mem.asBytes(&tcp_header_aligned), packet_data[transport_offset..transport_offset+@sizeOf(TcpHeader)]);
+                const tcp_header = &tcp_header_aligned;
 
                 // Optional: Validate TCP header length against captured length
                 const tcp_hdr_len_bytes = tcp_header.headerLength();
-                 if (tcp_hdr_len_bytes < 20 or caplen < transport_offset + tcp_hdr_len_bytes) {
-                     log.warn("Invalid TCP header length ({}) or insufficient captured data ({})", .{ tcp_hdr_len_bytes, caplen });
-                     return Error.InvalidPacketHeader;
-                 }
+                if (tcp_hdr_len_bytes < 20 or caplen < transport_offset + tcp_hdr_len_bytes) {
+                    log.debug("Invalid TCP header length ({}) or insufficient captured data ({})", .{ tcp_hdr_len_bytes, caplen });
+                    return Error.InvalidPacketHeader;
+                }
 
                 source_port = tcp_header.sourcePort();
                 dest_port = tcp_header.destPort();
                 transport_checksum = tcp_header.getChecksum();
             } else {
-                 log.warn("Packet too short for TCP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(TcpHeader) });
-                 return Error.InvalidPacketHeader; // Packet too short for fixed TCP header part
+                log.debug("Packet too short for TCP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(TcpHeader) });
+                return Error.InvalidPacketHeader; // Packet too short for fixed TCP header part
             }
         },
         17 => { // UDP
             protocol_type = .UDP;
             // Check length for UDP header
             if (caplen >= transport_offset + @sizeOf(UdpHeader)) {
-                 const udp_header_ptr = packet_data + transport_offset;
-                 const udp_header = @as(*const UdpHeader, @alignCast(@ptrCast(udp_header_ptr)));
-                 source_port = udp_header.sourcePort();
-                 dest_port = udp_header.destPort();
-                 transport_checksum = udp_header.getChecksum();
+                var udp_header_aligned: UdpHeader = undefined;
+                @memcpy(std.mem.asBytes(&udp_header_aligned), packet_data[transport_offset..transport_offset+@sizeOf(UdpHeader)]);
+                const udp_header = &udp_header_aligned;
+                
+                source_port = udp_header.sourcePort();
+                dest_port = udp_header.destPort();
+                transport_checksum = udp_header.getChecksum();
             } else {
-                 log.warn("Packet too short for UDP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(UdpHeader) });
-                 return Error.InvalidPacketHeader;
+                log.debug("Packet too short for UDP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(UdpHeader) });
+                return Error.InvalidPacketHeader;
             }
         },
         1 => { // ICMP
