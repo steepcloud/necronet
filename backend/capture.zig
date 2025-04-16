@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("common");
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("pcap_wrapper.h");
 });
 
@@ -146,7 +146,7 @@ pub fn getInterfaces(allocator: Allocator) ![]Interface {
 }
 
 // Helper function to parse packet info
-fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet: [*]const u8) ?PacketInfo {
+pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet: [*]const u8) ?PacketInfo {
     // Skip packets that are too small to contain Ethernet + IP headers
     if (header.len < 14 + 20) return null;
     
