@@ -36,9 +36,11 @@ fn mockPcapHeader(len: u32) capture.c.struct_pcap_pkthdr {
 }
 
 test "parsePacketInfo - valid TCP packet" {
-    // Mock Ethernet + IPv4 + TCP header
+    // Mocking Ethernet + IPv4 + TCP header
     // Dest MAC | Src MAC | EtherType | IPv4 Header ... | TCP Header ...
-    const mock_packet_data: [60]u8 = [_]u8{
+    // Size: 6 (dst) + 6 (src) + 2 (type) + 20 (ip) + 20 (tcp) + 8 (payload)
+    // Total: 62 bytes
+    const mock_packet_data: [62]u8 = [_]u8{
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, // Dest MAC
         0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, // Src MAC
         0x08, 0x00, // EtherType IPv4
@@ -135,13 +137,18 @@ test "parsePacketInfo - packet too small" {
 }
 
 test "parsePacketInfo - non-IPv4 packet" {
-    const mock_packet_data: [60]u8 = [_]u8{
-        0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b,
+    var mock_packet_data: [60]u8 = undefined;
+    const eth_header = [_]u8{
+        0x00,0x01,0x02,0x03,0x04,0x05, // Dest MAC
+        0x06,0x07,0x08,0x09,0x0a,0x0b, // Src MAC
         0x86, 0xDD, // EtherType IPv6
         // ... rest doesn't matter for this test
-    } ** 60; // Fill rest with 0
+    };
+    @memcpy(mock_packet_data[0..eth_header.len], &eth_header);
+
     const header = mockPcapHeader(@intCast(mock_packet_data.len));
     const packet_info = capture.parsePacketInfo(header, &mock_packet_data);
+    // expect null because parsePacketInfo currently only handles IPv4 (EtherType 0x0800)
     try testing.expect(packet_info == null);
 }
 
