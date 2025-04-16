@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("common");
+const log = std.log.scoped(.capture);
 
 pub const c = @cImport({
     @cInclude("pcap_wrapper.h");
@@ -12,6 +13,7 @@ pub const Error = error{
     CaptureInitFailed,
     SetFilterFailed,
     PacketCaptureFailed,
+    InvalidPacketHeader,
 };
 
 pub const Interface = struct {
@@ -26,8 +28,125 @@ pub const PacketInfo = struct {
     source_port: u16,
     dest_port: u16,
     protocol: common.Protocol,
-    size: usize,
-    timestamp: i64,
+    captured_len: u32, // caplen
+    original_len: u32, // len
+    timestamp_sec: i64,
+    timestamp_usec: i64, // for precision
+    checksum: u16,
+};
+
+pub const EthernetHeader = extern struct {
+    dest_mac: [6]u8,
+    src_mac: [6]u8,
+    ether_type: u16, // Big Endian
+
+    pub fn etherType(self: EthernetHeader) u16 {
+        return std.mem.readIntBig(u16, &self.ether_type);
+    }
+};
+
+pub const IpV4Header = extern struct {
+    version_ihl: u8, // version: 4 bits, ihl: 4 bits
+    dscp_ecn: u8, // dscp: 6 bits, ecn: 2 bits
+    total_length: u16, // Big Endian
+    identification: u16, // Big Endian
+    flags_fragment_offset: u16, // flags: 3 bits, fragment offset: 13 bits
+    ttl: u8,
+    protocol: u8,
+    checksum: u16, // Big Endian
+    source_ip: [4]u8, // Network order (Big Endian conceptually)
+    dest_ip: [4]u8, // Network order
+
+    pub fn ihl(self: IpV4Header) u8 {
+        return self.version_ihl & 0x0F;
+    }
+
+    pub fn headerLength(self: IpV4Header) u8 {
+        return self.ihl() * 4;
+    }
+
+    pub fn totalLength(self: IpV4Header) u16 {
+        return std.mem.readIntBig(u16, &self.total_length);
+    }
+};
+
+pub const TcpHeader = extern struct {
+    source_port: u16, // Big Endian
+    dest_port: u16, // Big Endian
+    sequence_number: u32, // Big Endian
+    ack_number: u32, // Big Endian
+    data_offset_reserved_flags: u16, // Big Endian: Data Offset (4), Reserved (3), NS(1), CWR(1), ECE(1), URG(1), ACK(1), PSH(1), RST(1), SYN(1), FIN(1)
+    window_size: u16, // Big Endian
+    checksum: u16, // Big Endian
+    urgent_pointer: u16, // Big Endian
+    // Options follow here, variable length
+
+    pub fn sourcePort(self: TcpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.source_port);
+    }
+    pub fn destPort(self: TcpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.dest_port);
+    }
+    pub fn sequenceNumber(self: TcpHeader) u32 {
+        return std.mem.readIntBig(u32, &self.sequence_number);
+    }
+    pub fn ackNumber(self: TcpHeader) u32 {
+        return std.mem.readIntBig(u32, &self.ack_number);
+    }
+    // Helper to get Data Offset (header length in 32-bit words)
+    pub fn dataOffset(self: TcpHeader) u4 {
+        const val = std.mem.readIntBig(u16, &self.data_offset_reserved_flags);
+        return @intCast(val >> 12); // Top 4 bits
+    }
+    // Helper to get header length in bytes
+    pub fn headerLength(self: TcpHeader) u8 {
+        return @as(u8, self.dataOffset()) * 4;
+    }
+    // Individual flag helpers
+    pub fn flags(self: TcpHeader) u9 {
+        const val = std.mem.readIntBig(u16, &self.data_offset_reserved_flags);
+        return @intCast(val & 0x1FF); // Lower 9 bits
+    }
+    pub fn flagFIN(self: TcpHeader) bool { return (self.flags() & 0x001) != 0; }
+    pub fn flagSYN(self: TcpHeader) bool { return (self.flags() & 0x002) != 0; }
+    pub fn flagRST(self: TcpHeader) bool { return (self.flags() & 0x004) != 0; }
+    pub fn flagPSH(self: TcpHeader) bool { return (self.flags() & 0x008) != 0; }
+    pub fn flagACK(self: TcpHeader) bool { return (self.flags() & 0x010) != 0; }
+    pub fn flagURG(self: TcpHeader) bool { return (self.flags() & 0x020) != 0; }
+    pub fn flagECE(self: TcpHeader) bool { return (self.flags() & 0x040) != 0; }
+    pub fn flagCWR(self: TcpHeader) bool { return (self.flags() & 0x080) != 0; }
+    pub fn flagNS(self: TcpHeader) bool { return (self.flags() & 0x100) != 0; }
+
+    pub fn windowSize(self: TcpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.window_size);
+    }
+    pub fn getChecksum(self: TcpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.checksum);
+    }
+    pub fn urgentPointer(self: TcpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.urgent_pointer);
+    }
+};
+
+pub const UdpHeader = extern struct {
+    source_port: u16, // Big Endian
+    dest_port: u16, // Big Endian
+    length: u16, // Big Endian - Length of UDP header + data
+    checksum: u16, // Big Endian
+
+    pub fn sourcePort(self: UdpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.source_port);
+    }
+    pub fn destPort(self: UdpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.dest_port);
+    }
+    // Returns length of UDP header + UDP data
+    pub fn getLength(self: UdpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.length);
+    }
+    pub fn getChecksum(self: UdpHeader) u16 {
+        return std.mem.readIntBig(u16, &self.checksum);
+    }
 };
 
 pub const CaptureSession = struct {
@@ -36,19 +155,25 @@ pub const CaptureSession = struct {
     allocator: Allocator,
 
     // Creates a new capture session for the specified device
-    pub fn init(allocator: Allocator, device_name: []const u8, promiscuous: bool, timeout_ms: u32) !CaptureSession {
+    pub fn init(
+        allocator: Allocator, 
+        device_name: []const u8, 
+        promiscuous: bool, 
+        timeout_ms: u32,
+        snapshot_len: u32
+    ) !CaptureSession {
         var errbuf: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
         
         const handle = c.pcap_open_live(
-            @ptrCast(device_name.ptr), 
-            65535,  // Snapshot length (max packet size)
-            if (promiscuous) 1 else 0, 
-            @intCast(timeout_ms), 
-            &errbuf
+            @ptrCast(device_name.ptr),
+            @intCast(snapshot_len),
+            if (promiscuous) 1 else 0,
+            @intCast(timeout_ms),
+            &errbuf,
         );
         
         if (handle == null) {
-            std.debug.print("Failed to open device {s}: {s}\n", .{device_name, errbuf});
+            log.err("Failed to open device {s}: {s}\n", .{device_name, errbuf});
             return Error.CaptureInitFailed;
         }
         
@@ -74,13 +199,13 @@ pub const CaptureSession = struct {
         
         // Compile the filter
         if (c.pcap_compile(self.handle, &bpf, @ptrCast(filter_str.ptr), 1, 0) < 0) {
-            std.debug.print("Failed to compile filter: {s}\n", .{c.pcap_geterr(self.handle)});
+            log.err("Failed to compile filter: {s}\n", .{c.pcap_geterr(self.handle)});
             return Error.SetFilterFailed;
         }
         
         // Apply the filter
         if (c.pcap_setfilter(self.handle, &bpf) < 0) {
-            std.debug.print("Failed to set filter: {s}\n", .{c.pcap_geterr(self.handle)});
+            log.err("Failed to set filter: {s}\n", .{c.pcap_geterr(self.handle)});
             c.pcap_freecode(&bpf);
             return Error.SetFilterFailed;
         }
@@ -146,60 +271,99 @@ pub fn getInterfaces(allocator: Allocator) ![]Interface {
 }
 
 // Helper function to parse packet info
-pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet: [*]const u8) ?PacketInfo {
-    // Skip packets that are too small to contain Ethernet + IP headers
-    if (header.len < 14 + 20) return null;
-    
-    // Skip non-IP packets (check EtherType field)
-    const ethertype = (@as(u16, packet[12]) << 8) | packet[13];
-    if (ethertype != 0x0800) return null; // 0x0800 is IPv4
-    
-    // Parse IP header
-    const ip_header = packet[14..];
-    const ip_header_len = (ip_header[0] & 0x0F) * 4;
-    
-    // Skip packets with invalid IP header
-    if (ip_header_len < 20) return null;
-    
-    // Parse protocol
-    const protocol = ip_header[9];
+pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !?PacketInfo {
+    const caplen = header.caplen; // Use captured length for bounds checks
+
+    // Check minimum length for Ethernet header
+    if (caplen < @sizeOf(EthernetHeader)) return null;
+
+    // Use @ptrCast to view the start of packet_data as an EthernetHeader
+    // WARNING: Assumes sufficient alignment from pcap.
+    const eth_header = @as(*const EthernetHeader, @ptrCast(packet_data));
+
+    // Check EtherType for IPv4
+    if (eth_header.etherType() != 0x0800) return null; // Not IPv4
+
+    // Check length for minimum IPv4 header
+    const ip_offset = @sizeOf(EthernetHeader);
+    if (caplen < ip_offset + @sizeOf(IpV4Header)) return null; // Basic check for fixed part
+
+    const ip_header_ptr = packet_data + ip_offset;
+    const ip_header = @as(*const IpV4Header, @ptrCast(ip_header_ptr));
+
+    // Validate IP header length field against captured length
+    const ip_hdr_len_bytes = ip_header.headerLength();
+    if (ip_hdr_len_bytes < 20 or caplen < ip_offset + ip_hdr_len_bytes) {
+        // Invalid header length or packet too short for declared header length
+        log.warn("Invalid IP header length ({}) or insufficient captured data ({})", .{ ip_hdr_len_bytes, caplen });
+        return Error.InvalidPacketHeader;
+    }
+
     var protocol_type: common.Protocol = .Unknown;
-    
-    // Source and destination IP
-    const source_ip: [4]u8 = .{ip_header[12], ip_header[13], ip_header[14], ip_header[15]};
-    const dest_ip: [4]u8 = .{ip_header[16], ip_header[17], ip_header[18], ip_header[19]};
-    
-    // Default ports
     var source_port: u16 = 0;
     var dest_port: u16 = 0;
-    
-    // Transport layer header starts after IP header
-    const transport_header = ip_header[ip_header_len..];
-    
-    // Parse TCP or UDP
-    if (protocol == 6) { // TCP
-        protocol_type = .TCP;
-        if (header.len >= 14 + ip_header_len + 4) { // Enough space for TCP ports
-            source_port = (@as(u16, transport_header[0]) << 8) | transport_header[1];
-            dest_port = (@as(u16, transport_header[2]) << 8) | transport_header[3];
-        }
-    } else if (protocol == 17) { // UDP
-        protocol_type = .UDP;
-        if (header.len >= 14 + ip_header_len + 4) { // Enough space for UDP ports
-            source_port = (@as(u16, transport_header[0]) << 8) | transport_header[1];
-            dest_port = (@as(u16, transport_header[2]) << 8) | transport_header[3];
-        }
-    } else if (protocol == 1) { // ICMP
-        protocol_type = .ICMP;
+    var transport_checksum: u16 = 0;
+
+    const transport_offset = ip_offset + ip_hdr_len_bytes;
+
+    switch (ip_header.protocol) {
+        6 => { // TCP
+            protocol_type = .TCP;
+            // Check length for minimum TCP header (fixed part)
+            if (caplen >= transport_offset + @sizeOf(TcpHeader)) {
+                const tcp_header_ptr = packet_data + transport_offset;
+                const tcp_header = @as(*const TcpHeader, @ptrCast(tcp_header_ptr));
+
+                // Optional: Validate TCP header length against captured length
+                const tcp_hdr_len_bytes = tcp_header.headerLength();
+                 if (tcp_hdr_len_bytes < 20 or caplen < transport_offset + tcp_hdr_len_bytes) {
+                     log.warn("Invalid TCP header length ({}) or insufficient captured data ({})", .{ tcp_hdr_len_bytes, caplen });
+                     return Error.InvalidPacketHeader;
+                 }
+
+                source_port = tcp_header.sourcePort();
+                dest_port = tcp_header.destPort();
+                transport_checksum = tcp_header.getChecksum();
+            } else {
+                 log.warn("Packet too short for TCP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(TcpHeader) });
+                 return Error.InvalidPacketHeader; // Packet too short for fixed TCP header part
+            }
+        },
+        17 => { // UDP
+            protocol_type = .UDP;
+            // Check length for UDP header
+            if (caplen >= transport_offset + @sizeOf(UdpHeader)) {
+                 const udp_header_ptr = packet_data + transport_offset;
+                 const udp_header = @as(*const UdpHeader, @ptrCast(udp_header_ptr));
+                 source_port = udp_header.sourcePort();
+                 dest_port = udp_header.destPort();
+                 transport_checksum = udp_header.getChecksum();
+            } else {
+                 log.warn("Packet too short for UDP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(UdpHeader) });
+                 return Error.InvalidPacketHeader;
+            }
+        },
+        1 => { // ICMP
+            protocol_type = .ICMP;
+            // TODO: Parse ICMP type, code, and checksum if needed.
+            // Checksum is typically at offset 2 within ICMP data.
+        },
+        else => {
+             log.debug("Unknown IP protocol: {}", .{ip_header.protocol});
+        },
     }
-    
+
+    // Ensure PacketInfo struct definition matches these fields
     return PacketInfo{
-        .source_ip = source_ip,
-        .dest_ip = dest_ip,
+        .source_ip = ip_header.source_ip,
+        .dest_ip = ip_header.dest_ip,
         .source_port = source_port,
         .dest_port = dest_port,
         .protocol = protocol_type,
-        .size = header.len,
-        .timestamp = header.ts.tv_sec,
+        .captured_len = caplen,
+        .original_len = header.len,
+        .timestamp_sec = header.ts.tv_sec,
+        .timestamp_usec = header.ts.tv_usec,
+        .checksum = transport_checksum,
     };
 }
