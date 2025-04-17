@@ -1,5 +1,6 @@
 const std = @import("std");
 const capture = @import("backend");
+const detection = @import("detection");
 const common = @import("common");
 
 pub fn main() !void {
@@ -87,17 +88,59 @@ pub fn main() !void {
     std.debug.print("Applying filter: {s}\n", .{filter});
     try session.setFilter(filter);
 
+    // init detection engine
+    var engine = try detection.DetectionEngine.init(allocator);
+    defer engine.deinit();
+
+    // load default detection rules
+    try engine.loadDefaultRules();
+
+    // init alert counters
+    var total_packets: u32 = 0;
+    var alert_count: u32 = 0;
+
     // Capture packets in a loop
     std.debug.print("Press Ctrl+C to stop capturing\n\n", .{});
+    std.debug.print("Starting packet capture with intrusion detection...\n", .{});
+    
     while (true) {
-        const if_packet = try session.capturePacket();
-        if (if_packet) |packet| {
-            // If a packet was captured and parsed, print its info
-            printPacketInfo(packet);
+        const packet_data = try session.captureRawPacket();
+
+        if (packet_data) |data| {
+            // parsing packet
+            const pcap_header = data.header;
+            const packet_bytes = data.packet_data[0..data.header.caplen];
+
+            // get the parsed packet info
+            const packet_info = try capture.parsePacketInfo(pcap_header, packet_bytes.ptr);
+            
+            if (packet_info) |packet| {
+                total_packets += 1;
+
+                // displaying packet info
+                printPacketInfo(packet);
+
+                // running the packet through the detection engine
+                if (try engine.analyzePacket(packet, packet_bytes)) |alert| {
+                    alert_count += 1;
+
+                    // printing alert info
+                    printAlert(alert);
+
+                    @constCast(&alert).deinit(allocator);
+                }
+
+                // status update every 100 packets
+                if (total_packets % 100 == 0) {
+                    std.debug.print("\n--- Stats: {d} packets processed, {d} alerts generated ---\n\n", 
+                        .{total_packets, alert_count});
+                }
+            }
+
+            allocator.free(data.packet_data);
         } else {
-            // Handle timeout or non-IP packets (if filter is "ip")
-            // You could add a small sleep here if desired to prevent busy-waiting on timeout
-            // std.time.sleep(10 * std.time.ns_per_ms);
+            // no packet available (timeout)
+            std.time.sleep(10 * std.time.ns_per_ms); // small sleep to prevent CPU hogging
         }
     }
 }
@@ -113,7 +156,7 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
                     packet.source_port,
                     packet.dest_ip[0], packet.dest_ip[1], packet.dest_ip[2], packet.dest_ip[3],
                     packet.dest_port,
-                    packet.captured_len, // Fixed: was packet.size
+                    packet.captured_len,
                 }
             );
         },
@@ -163,4 +206,63 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
             std.debug.print("\n", .{});
         }
     }
+}
+
+fn printAlert(alert: detection.Alert) void {
+    // get severity color
+    const color = switch (alert.severity) {
+        .Low => "\x1b[34m", // blue
+        .Medium => "\x1b[33m", // yellow
+        .High => "\x1b[31m", // red
+        .Critical => "\x1b[35m", // magenta
+    };
+
+    const reset = "\x1b[0m";
+
+    // printing alert with colored severity
+    std.debug.print("\n{s}[!] ALERT [{s}] ID: {d} [!]{s}\n", .{
+        color, @tagName(alert.severity), alert.id, reset
+    });
+
+    std.debug.print("Category: {s}\n", .{alert.category});
+    std.debug.print("Message: {s}\n", .{alert.message});
+    
+    // printing timestamp as human-readable date
+    //const timestamp_seconds = @as(u64, @intCast(alert.timestamp));
+    //const timestamp_nanos = timestamp_seconds * std.time.ns_per_s;
+    
+    var buffer: [64]u8 = undefined;
+    const timestamp_str = if (alert.timestamp >= 0) blk: {
+        const epoch_seconds = @as(u64, @intCast(alert.timestamp));
+            
+        const secs_per_day = 86400;
+        const secs_per_hour = 3600;
+        const secs_per_min = 60;
+
+        // calc year (approx.)
+        const days_since_epoch = epoch_seconds / secs_per_day;
+        const years_since_epoch = days_since_epoch / 365;
+        const year = 1970 + years_since_epoch;
+            
+        const day_secs = epoch_seconds % secs_per_day;
+        const hours = day_secs / secs_per_hour;
+        const mins = (day_secs % secs_per_hour) / secs_per_min;
+        const secs = day_secs % secs_per_min;
+            
+        // YYYY-MM-DD HH:MM:SS
+        break :blk std.fmt.bufPrint(&buffer, "{d}-??-?? {d:0>2}:{d:0>2}:{d:0>2}",
+            .{ year, hours, mins, secs }) catch "unknown time";
+    } else "before 1970";
+    
+    std.debug.print("Time: {s}\n", .{timestamp_str});
+    std.debug.print("Source: {d}.{d}.{d}.{d}:{d}\n", .{
+        alert.source_ip[0], alert.source_ip[1], alert.source_ip[2], alert.source_ip[3], 
+        alert.source_port
+    });
+    std.debug.print("Destination: {d}.{d}.{d}.{d}:{d}\n", .{
+        alert.dest_ip[0], alert.dest_ip[1], alert.dest_ip[2], alert.dest_ip[3], 
+        alert.dest_port
+    });
+    std.debug.print("Protocol: {s}\n", .{@tagName(alert.protocol)});
+    std.debug.print("{s}------------------------------------------{s}\n", .{color, reset});
 }
