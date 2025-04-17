@@ -23,6 +23,11 @@ pub const Interface = struct {
     is_loopback: bool,
 };
 
+pub const RawPacketData = struct {
+    header: c.struct_pcap_pkthdr,
+    packet_data: []u8,
+};
+
 pub const PacketInfo = struct {
     source_ip: [4]u8,
     dest_ip: [4]u8,
@@ -264,13 +269,45 @@ pub const CaptureSession = struct {
         // Parse basic packet info (for IPv4 packets)
         return parsePacketInfo((header.?).*, @as([*]const u8, @ptrCast(packet.?)));
     }
+
+    pub fn captureRawPacket(self: *CaptureSession) !?RawPacketData {
+        var header: ?*c.struct_pcap_pkthdr = null;
+        var packet_data: [*c]const u8 = null;
+
+        // capture a packet
+        const result = c.pcap_next_ex(self.handle, &header, &packet_data);
+        
+        if (result == 0) {
+            // timeout
+            return null;
+        } else if (result < 0) {
+            const err_msg = c.pcap_geterr(self.handle);
+            log.err("Failed to capture packet: {s}", .{err_msg});
+            return Error.PacketCaptureFailed;
+        }
+
+        if (header == null or packet_data == null) {
+            log.debug("Received null packet", .{});
+            return null;
+        }
+
+        // alloc memory for the packet data and copy it
+        const caplen = header.?.caplen;
+        const data_copy = try self.allocator.alloc(u8, caplen);
+        @memcpy(data_copy, packet_data[0..caplen]);
+
+        return RawPacketData{
+            .header = header.?.*, 
+            .packet_data = data_copy,
+        };
+    }
 };
 
 pub const IcmpHeader = extern struct {
     type: u8,
     code: u8,
     checksum: u16, // Big Endian
-    rest_of_header: u32, // Big Endian, contents vary by type/c_longdouble
+    rest_of_header: u32, // Big Endian, contents vary by type/code
 
     pub fn getType(self: IcmpHeader) u8 {
         return self.type;
