@@ -210,24 +210,40 @@ pub const CaptureSession = struct {
         self.allocator.free(self.device_name);
     }
     
-    // Set a BPF filter
     pub fn setFilter(self: *CaptureSession, filter_str: []const u8) !void {
-        var bpf: c.struct_bpf_program = undefined;
-        
-        // Compile the filter
-        if (c.pcap_compile(self.handle, &bpf, @ptrCast(filter_str.ptr), 1, 0) < 0) {
-            log.err("Failed to compile filter: {s}\n", .{c.pcap_geterr(self.handle)});
+        // expand shorthand filters to proper BPF syntax
+        const expanded_filter = try expandFilterExpression(filter_str, self.allocator);
+        defer self.allocator.free(expanded_filter);
+
+        // convert to null-terminated string
+        const c_filter = try self.allocator.dupeZ(u8, expanded_filter);
+        defer self.allocator.free(c_filter);
+
+        // compile the filter expression
+        var program: c.struct_bpf_program = undefined;
+
+        // using netmask for proper filter compilation (PCAP requires this)
+        const netmask: c.bpf_u_int32 = 0xffffff00; // 255.255.255.0
+
+        const result = c.pcap_compile(self.handle, &program, c_filter.ptr, 1, netmask);
+        if (result < 0) {
+            const err_msg = c.pcap_geterr(self.handle);
+            log.err("Failed to compile filter: {s}\n", .{err_msg});
             return Error.SetFilterFailed;
         }
+        defer c.pcap_freecode(&program);
         
         // Apply the filter
-        if (c.pcap_setfilter(self.handle, &bpf) < 0) {
-            log.err("Failed to set filter: {s}\n", .{c.pcap_geterr(self.handle)});
-            c.pcap_freecode(&bpf);
+        const set_result = c.pcap_setfilter(self.handle, &program);
+        if (set_result < 0) {
+            const err_msg = c.pcap_geterr(self.handle);
+            log.err("Failed to set filter: {s}\n", .{err_msg});
             return Error.SetFilterFailed;
         }
-        
-        c.pcap_freecode(&bpf);
+
+        if (!std.mem.eql(u8, filter_str, expanded_filter)) {
+            log.info("Expanded filter '{s}' to '{s}'\n", .{filter_str, expanded_filter});
+        }
     }
     
     // Capture a single packet and parse its info
@@ -487,4 +503,36 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         .checksum = transport_checksum,
         .payload = payload_slice,
     };
+}
+
+fn expandFilterExpression(filter: []const u8, allocator: Allocator) ![]const u8 {
+    // Common shorthands and their proper BPF expressions
+    if (std.mem.eql(u8, filter, "dns")) {
+        return allocator.dupe(u8, "udp port 53 or tcp port 53");
+    } else if (std.mem.eql(u8, filter, "http")) {
+        return allocator.dupe(u8, "tcp port 80");
+    } else if (std.mem.eql(u8, filter, "https")) {
+        return allocator.dupe(u8, "tcp port 443");
+    } else if (std.mem.eql(u8, filter, "web")) {
+        return allocator.dupe(u8, "tcp port 80 or tcp port 443");
+    } else if (std.mem.eql(u8, filter, "ssh")) {
+        return allocator.dupe(u8, "tcp port 22");
+    } else if (std.mem.eql(u8, filter, "telnet")) {
+        return allocator.dupe(u8, "tcp port 23");
+    } else if (std.mem.eql(u8, filter, "ftp")) {
+        return allocator.dupe(u8, "tcp port 21");
+    } else if (std.mem.eql(u8, filter, "smtp")) {
+        return allocator.dupe(u8, "tcp port 25");
+    } else if (std.mem.eql(u8, filter, "mail")) {
+        return allocator.dupe(u8, "tcp port 25 or tcp port 110 or tcp port 143");
+    } else if (std.mem.eql(u8, filter, "dhcp")) {
+        return allocator.dupe(u8, "udp port 67 or udp port 68");
+    } else if (std.mem.eql(u8, filter, "ntp")) {
+        return allocator.dupe(u8, "udp port 123");
+    } else if (std.mem.eql(u8, filter, "snmp")) {
+        return allocator.dupe(u8, "udp port 161");
+    }
+    
+    // If not a known shorthand, return the original filter
+    return allocator.dupe(u8, filter);
 }
