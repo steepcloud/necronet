@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const capture = @import("capture.zig");
+const capture = @import("backend");
 const common = @import("common");
 const log = std.log.scoped(.detection);
 
@@ -61,7 +61,7 @@ pub const DetectionRule = struct {
     severity: AlertSeverity,
     /// Rule condition - implemented as a function pointer to keep this extensible
     /// Returns true if the rule matches the packet
-    condition: *const fn(packet: capture.PacketInfo) bool,
+    condition: *const fn(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool,
     /// Message template for alerts
     message_template: []const u8,
     requires_conn_state: bool,
@@ -460,25 +460,54 @@ pub const DetectionEngine = struct {
         rule: DetectionRule,
         packet_info: capture.PacketInfo
     ) !Alert {
-        // Get next alert ID
-        const alert_id = self.alert_counter.fetchAdd(1, .Monotonic);
-                
-        // Format alert message
-        const message = try std.fmt.allocPrint(
+        // get next alert ID
+        const alert_id = self.alert_counter.fetchAdd(1, .monotonic);
+        
+        const source_ip_str = try std.fmt.allocPrint(
             self.allocator,
-            rule.message_template,
+            "{d}.{d}.{d}.{d}",
             .{
-                packet_info.source_ip[0], packet_info.source_ip[1], 
-                packet_info.source_ip[2], packet_info.source_ip[3],
-                packet_info.source_port,
-                packet_info.dest_ip[0], packet_info.dest_ip[1], 
-                packet_info.dest_ip[2], packet_info.dest_ip[3],
-                packet_info.dest_port,
-                @tagName(packet_info.protocol),
+                packet_info.source_ip[0], packet_info.source_ip[1],
+                packet_info.source_ip[2], packet_info.source_ip[3]
             }
         );
+        defer self.allocator.free(source_ip_str);
+
+        const dest_ip_str = try std.fmt.allocPrint(
+            self.allocator, 
+            "{d}.{d}.{d}.{d}",
+            .{
+                packet_info.dest_ip[0], packet_info.dest_ip[1],
+                packet_info.dest_ip[2], packet_info.dest_ip[3]
+            }
+        );
+        defer self.allocator.free(dest_ip_str);
+        
+        const source_port_str = try std.fmt.allocPrint(
+        self.allocator, "{d}", .{packet_info.source_port}
+        );
+        defer self.allocator.free(source_port_str);
+        
+        const dest_port_str = try std.fmt.allocPrint(
+            self.allocator, "{d}", .{packet_info.dest_port}
+        );
+        defer self.allocator.free(dest_port_str);
+        
+        const protocol_str = @tagName(packet_info.protocol);
                 
-        // Create category string
+        const message = try std.fmt.allocPrint(
+            self.allocator,
+            "Connection from {s}:{s} to {s}:{s} using {s} triggered rule: {s}",
+            .{
+                source_ip_str,
+                source_port_str,
+                dest_ip_str,
+                dest_port_str,
+                protocol_str,
+                rule.name,
+            }
+        );
+
         const category = try self.allocator.dupe(u8, rule.name);
                 
         // Create and return the alert
@@ -1133,10 +1162,15 @@ fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionStat
 fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         // Alert on connections that stay in SYN_SENT state with multiple packets
-        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 5;
+        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 20;
+
+        const now = std.time.timestamp();
+        const time_window = now - conn.first_seen;
+        const MIN_TIME_WINDOW: i64 = 3; // at least 3 seconds to avoid false positives
         
         return conn.tcp_state == .SynSent and 
-               conn.packet_count >= SYN_FLOOD_PACKET_THRESHOLD;
+               conn.packet_count >= SYN_FLOOD_PACKET_THRESHOLD and
+               time_window <= MIN_TIME_WINDOW;
     }
     return false;
 }
@@ -1181,6 +1215,11 @@ fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionStat
 
 /// Check if IP is in private ranges
 fn isPrivateIP(ip: [4]u8) bool {
+    // Localhost/loopback 127.0.0.0/8
+    if (ip[0] == 127) {
+        return true;
+    }
+    
     // 10.0.0.0/8
     if (ip[0] == 10) {
         return true;
@@ -1325,10 +1364,10 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
             
             // 4. Parse QNAME for domain analysis
             if (qdcount > 0) {
-                var domain_parts = std.ArrayList([]const u8).init(conn.allocator);
-                defer domain_parts.deinit();
+                var domain_parts_buffer: [32][]const u8 = undefined;
+                var domain_parts_count: usize = 0;
 
-                var i: usize = 12; // Start after header
+                var i: usize = 12; // start after header
                 var total_domain_len: usize = 0;
                 var domain_entropy: f64 = 0;
                 var char_counts = [_]usize{0} ** 256;
@@ -1344,7 +1383,10 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
 
                     // track and analyze the label
                     const label = payload[i+1..i+1+label_len];
-                    domain_parts.append(label) catch {};
+                    if (domain_parts_count < domain_parts_buffer.len) {
+                        domain_parts_buffer[domain_parts_count] = label;
+                        domain_parts_count += 1;
+                    }
                     total_domain_len += label_len;
 
                     // character distribution for entropy analysis
@@ -1376,7 +1418,7 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
 
                 // 7. Check for numeric-heavy subdomains (often used in tunneling)
                 var numeric_count: usize = 0;
-                for (domain_parts.items) |part| {
+                for (domain_parts_buffer[0..domain_parts_count]) |part| {
                     var digit_count: usize = 0;
                     for (part) |char| {
                         if (char >= '0' and char <= '9') {
@@ -1391,12 +1433,12 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
                 }
 
                 // suspicious if many parts are heavily numeric
-                if (numeric_count >= 3 and domain_parts.items.len >= 5) {
+                if (numeric_count >= 3 and domain_parts_count >= 5) {
                     return true;
                 }
 
                 // 8. Check for excessive subdomain count
-                if (domain_parts.items.len > 10) { // unusually many subdomains
+                if (domain_parts_count > 10) { // unusually many subdomains
                     return true;
                 }
 
@@ -1410,7 +1452,7 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
                 }
                 
                 // 10. If this is a response, check for unusual record types
-                if (is_response ** ancount > 0) {
+                if (is_response and ancount > 0) {
                     // look for .txt records, often abused for data exfiltration
                     const qtype_offset = i + 1; // +1 for the terminating zero
                     if (qtype_offset + 2 < payload.len) {
