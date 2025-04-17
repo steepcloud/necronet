@@ -34,6 +34,7 @@ pub const PacketInfo = struct {
     timestamp_sec: i64,
     timestamp_usec: i64, // for precision
     checksum: u16,
+    payload: ?[]const u8,
 };
 
 pub const EthernetHeader = extern struct {
@@ -249,6 +250,44 @@ pub const CaptureSession = struct {
     }
 };
 
+pub const IcmpHeader = extern struct {
+    type: u8,
+    code: u8,
+    checksum: u16, // Big Endian
+    rest_of_header: u32, // Big Endian, contents vary by type/c_longdouble
+
+    pub fn getType(self: IcmpHeader) u8 {
+        return self.type;
+    }
+
+    pub fn getCode(self: IcmpHeader) u8 {
+        return self.code;
+    }
+
+    pub fn getChecksum(self: IcmpHeader) u16 {
+        const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
+        return std.mem.readInt(u16, ptr, Endian.big);
+    }
+
+    pub fn getId(self: IcmpHeader) u16 {
+        // for echo request/reply (types 0 and 8), first 2 bytes of rest_of_header is ID
+        if (self.type == 0 or self.type == 8) {
+            const ptr = @as(*const [4]u8, @ptrCast(&self.rest_of_header));
+            return std.mem.readInt(u16, ptr[0..2], Endian.big);
+        }
+        return 0;
+    }
+
+    pub fn getSeq(self: IcmpHeader) u16 {
+        // for echo request/reply (types 0 and 8), last 2 bytes of rest_of_header is sequence
+        if (self.type == 0 or self.type == 8) {
+            const ptr = @as(*const [4]u8, @ptrCast(&self.rest_of_header));
+            return std.mem.readInt(u16, ptr[2..4], Endian.big);
+        }
+        return 0;
+    }
+};
+
 // Get a list of available network interfaces
 pub fn getInterfaces(allocator: Allocator) ![]Interface {
     var err_buf: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
@@ -371,12 +410,66 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         },
         1 => { // ICMP
             protocol_type = .ICMP;
-            // TODO: Parse ICMP type, code, and checksum if needed.
-            // Checksum is typically at offset 2 within ICMP data.
+            // Parsing ICMP header fields
+            if (caplen >= transport_offset + @sizeOf(IcmpHeader)) {
+                var icmp_header_aligned: IcmpHeader = undefined;
+                @memcpy(std.mem.asBytes(&icmp_header_aligned),
+                packet_data[transport_offset..transport_offset+@sizeOf(IcmpHeader)]);
+                const icmp_header = &icmp_header_aligned;
+
+                // we don't have ports for ICMP, but instead we can store
+                // the type and code in the source_port and dest_port fields
+                // for use in detection rules
+                source_port = icmp_header.getType();
+                dest_port = icmp_header.getCode();
+                transport_checksum = icmp_header.getChecksum();
+            } else {
+                log.debug("Packet too short for ICMP header (caplen : {}, required: {})",
+                    .{ caplen, transport_offset + @sizeOf(IcmpHeader) });
+                return Error.InvalidPacketHeader;
+            }
         },
         else => {
              log.debug("Unknown IP protocol: {}", .{ip_header.protocol});
         },
+    }
+
+    var payload_offset: usize = 0;
+    var payload_length: usize = 0;
+
+    switch(protocol_type) {
+        .TCP => {
+            if (caplen >= transport_offset + @sizeOf(TcpHeader)) {
+                var tcp_header_aligned: TcpHeader = undefined;
+                @memcpy(std.mem.asBytes(&tcp_header_aligned), 
+                    packet_data[transport_offset..transport_offset+@sizeOf(TcpHeader)]);
+                const tcp_header = &tcp_header_aligned;
+
+                payload_offset = transport_offset + tcp_header.headerLength();
+                if (payload_offset < caplen) {
+                    payload_length = caplen - payload_offset;
+                }
+            }
+        },
+        .UDP => {
+            payload_offset = transport_offset + @sizeOf(UdpHeader);
+            if (payload_offset < caplen) {
+                payload_length = caplen - payload_offset;
+            }
+        },
+        .ICMP => {
+            payload_offset = transport_offset + @sizeOf(IcmpHeader);
+            if (payload_offset < caplen) {
+                payload_length = caplen - payload_offset;
+            }
+        },
+        else => {},
+    }
+
+    // extract payload slice
+    var payload_slice: ?[]const u8 = null;
+    if (payload_length > 0) {
+        payload_slice = packet_data[payload_offset..payload_offset+payload_length];
     }
 
     // Ensure PacketInfo struct definition matches these fields
@@ -391,5 +484,6 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         .timestamp_sec = header.ts.tv_sec,
         .timestamp_usec = header.ts.tv_usec,
         .checksum = transport_checksum,
+        .payload = payload_slice,
     };
 }
