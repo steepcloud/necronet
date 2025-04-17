@@ -75,6 +75,11 @@ test "parsePacketInfo - valid TCP packet" {
     try testing.expect(packet_info != null);
     const info = packet_info.?;
 
+    try testing.expect(info.payload != null);
+    if (info.payload) |payload| {
+        try testing.expectEqualSlices(u8, &[_]u8{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11}, payload);   
+    }
+
     // Assertions (remain the same)
     try testing.expectEqual(common.Protocol.TCP, info.protocol);
     try testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 100 }, &info.source_ip);
@@ -119,6 +124,12 @@ test "parsePacketInfo - valid UDP packet" {
 
     try testing.expect(packet_info != null);
     const info = packet_info.?;
+
+    try testing.expect(info.payload != null);
+    if (info.payload) |payload| {
+        try testing.expectEqualSlices(u8, &[_]u8{0xde, 0xad, 0xbe, 0xef}, payload);
+    }
+
     try testing.expectEqual(common.Protocol.UDP, info.protocol);
     try testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 101 }, &info.source_ip);
     try testing.expectEqualSlices(u8, &[_]u8{ 8, 8, 4, 4 }, &info.dest_ip);
@@ -162,14 +173,64 @@ test "parsePacketInfo - ICMP packet" {
     try testing.expectEqual(common.Protocol.ICMP, info.protocol);
     try testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 102 }, &info.source_ip);
     try testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 1, 1 }, &info.dest_ip);
-    try testing.expectEqual(@as(u16, 0), info.source_port);
+    try testing.expectEqual(@as(u16, 8), info.source_port);
     try testing.expectEqual(@as(u16, 0), info.dest_port);
-    // Use aligned buffer length in assertions
+    // using aligned buffer length in assertions
     try testing.expectEqual(@as(u32, 42), info.captured_len);
     try testing.expectEqual(@as(u32, 42), info.original_len);
     try testing.expectEqual(@as(i64, 1234567890), info.timestamp_sec);
     try testing.expectEqual(@as(i64, 987654), info.timestamp_usec);
-    try testing.expectEqual(@as(u16, 0), info.checksum);
+    try testing.expectEqual(@as(u16, 0xabcd), info.checksum);
+
+    // checking ICMP payload (would be empty in this case)
+    try testing.expect(info.payload != null);
+    if (info.payload) |payload| {
+        try testing.expectEqual(@as(usize, 0), payload.len);
+    }
+}
+
+test "parsePacketInfo - ICMP with payload" {
+    // Static mock data with ICMP echo request + payload
+    const mock_packet_data_static: [50]u8 = [_]u8{
+        0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x08,0x00, // Eth
+        // IP Header (20 bytes)
+        0x45, 0x00, 0x00, 0x32, // Version/IHL, ToS, Total Length (50)
+        0x00, 0x01, 0x00, 0x00, // ID, Flags, Frag Offset
+        0x40, 0x01, 0x00, 0x00, // TTL (64), Protocol (1=ICMP), Checksum
+        192, 168, 1, 102, // Source IP
+        1, 1, 1, 1, // Dest IP
+        // ICMP Header (8 bytes)
+        0x08, 0x00, 0xab, 0xcd, // Type, Code, Checksum
+        0x00, 0x01, 0x00, 0x01, // Identifier, Sequence Number
+        // ICMP Payload (8 bytes - common in ping packet)
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    };
+
+    // alloc aligned buffer and set up as in other tests
+    const alignment = @alignOf(capture.EthernetHeader);
+    const aligned_packet_buffer = try test_allocator.alignedAlloc(u8, alignment, mock_packet_data_static.len);
+    defer test_allocator.free(aligned_packet_buffer);
+    @memcpy(aligned_packet_buffer, &mock_packet_data_static);
+
+    const header = mockPcapHeader(@intCast(aligned_packet_buffer.len), @intCast(aligned_packet_buffer.len));
+    const packet_info = try capture.parsePacketInfo(header, aligned_packet_buffer.ptr);
+
+    try testing.expect(packet_info != null);
+    const info = packet_info.?;
+    
+    // basic protocol assertions
+    try testing.expectEqual(common.Protocol.ICMP, info.protocol);
+    try testing.expectEqual(@as(u16, 8), info.source_port); // ICMP type 8
+    try testing.expectEqual(@as(u16, 0), info.dest_port);   // ICMP code 0
+    
+    // payload check
+    try testing.expect(info.payload != null);
+    if (info.payload) |payload| {
+        try testing.expectEqualSlices(u8, 
+            &[_]u8{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17}, 
+            payload
+        );
+    }
 }
 
 test "parsePacketInfo - packet too small (Ethernet)" {
@@ -264,7 +325,7 @@ test "parsePacketInfo - non-IPv4 packet" {
 // Placeholder test needs updating for snapshot_len
 test "CaptureSession init/deinit (placeholder)" {
     // This test requires mocking pcap_open_live to actually pass.
-    // For now, just verify the error behavior
+    // For now, we just verify the error behavior
     const result = capture.CaptureSession.init(
         test_allocator, 
         "fake_device_name", 

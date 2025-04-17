@@ -466,13 +466,14 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         else => {},
     }
 
-    // extract payload slice
-    var payload_slice: ?[]const u8 = null;
-    if (payload_length > 0) {
-        payload_slice = packet_data[payload_offset..payload_offset+payload_length];
-    }
+    // extract payload slice (always creating a slice, even if length is 0)
+    const payload_slice = if (payload_length > 0) 
+        packet_data[payload_offset..payload_offset+payload_length]
+    else if (payload_offset > 0)
+        @as([*]const u8, @ptrCast(&packet_data[payload_offset]))[0..0] // empty slice at the current offset
+    else 
+        &[_]u8{}; // generic empty slice if we have no valid offset
 
-    // Ensure PacketInfo struct definition matches these fields
     return PacketInfo{
         .source_ip = ip_header.source_ip,
         .dest_ip = ip_header.dest_ip,
