@@ -10,6 +10,11 @@ pub fn build(b: *std.Build) void {
     });
     backend_module.addIncludePath(b.path("."));
 
+    const detection_module = b.createModule(.{
+        .root_source_file = b.path("backend/detection.zig"),
+    });
+    detection_module.addIncludePath(b.path("."));
+
     if (target.result.os.tag == .windows) {
         backend_module.addIncludePath(b.path("npcap-sdk-1.15/Include"));
     }
@@ -23,6 +28,8 @@ pub fn build(b: *std.Build) void {
     });
 
     backend_module.addImport("common", common_module);
+    detection_module.addImport("common", common_module);
+    detection_module.addImport("backend", backend_module);
     ipc_module.addImport("common", common_module);
 
     // main executable
@@ -35,6 +42,7 @@ pub fn build(b: *std.Build) void {
 
     // add modules to the main executable
     exe.root_module.addImport("backend", backend_module);
+    exe.root_module.addImport("detection", detection_module);
     exe.root_module.addImport("ipc", ipc_module);
     exe.root_module.addImport("common", common_module);
 
@@ -79,6 +87,7 @@ pub fn build(b: *std.Build) void {
 
     // add modules to the tests
     unit_tests.root_module.addImport("backend", backend_module);
+    unit_tests.root_module.addImport("detection", detection_module);
     unit_tests.root_module.addImport("ipc", ipc_module);
     unit_tests.root_module.addImport("common", common_module);
 
