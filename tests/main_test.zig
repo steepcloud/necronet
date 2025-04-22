@@ -4,6 +4,7 @@ const backend = @import("backend");
 const common = @import("common");
 
 pub const test_capture = @import("test_bnd_capture.zig");
+pub const test_detection = @import("test_bnd_detection.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -19,8 +20,7 @@ test "capture test" {
     try testing.expect(true);
 }
 
-// Example to test Protocol enum
-//test "protocol enum exists" {
-//    const tcp = common.Protocol.TCP;
-//    try testing.expectEqual(common.Protocol.TCP, tcp);
-//}
+test "detection test" {
+    std.debug.print("RUNNING DETECTION TEST\n", .{});
+    try testing.expect(true);
+}

@@ -1159,7 +1159,7 @@ fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionStat
 }
 
 /// Detect SYN flood attacks
-fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         // Alert on connections that stay in SYN_SENT state with multiple packets
         const SYN_FLOOD_PACKET_THRESHOLD: u32 = 20;
