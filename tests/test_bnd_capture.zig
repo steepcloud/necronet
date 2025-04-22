@@ -189,6 +189,36 @@ test "parsePacketInfo - ICMP packet" {
     }
 }
 
+test "parsePacketInfo - ICMP echo reply" {
+    // static mock data with ICMP echo reply (Type 0, Code 0)
+    const mock_packet_data_static: [42]u8 = [_]u8{
+        0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x08,0x00, // Eth
+        // IP Header (20 bytes)
+        0x45, 0x00, 0x00, 0x2a, // Version/IHL, ToS, Total Length (42)
+        0x00, 0x01, 0x00, 0x00, // ID, Flags, Frag Offset
+        0x40, 0x01, 0x00, 0x00, // TTL (64), Protocol (1=ICMP), Checksum
+        1, 1, 1, 1, // Source IP (server)
+        192, 168, 1, 102, // Dest IP (client)
+        // ICMP Header (8 bytes, Type=0, Code=0 for Echo Reply)
+        0x00, 0x00, 0xab, 0xcd, // Type, Code, Checksum
+        0x00, 0x01, 0x00, 0x01, // Identifier, Sequence Number
+    };
+
+    const alignment = @alignOf(capture.EthernetHeader);
+    const aligned_packet_buffer = try test_allocator.alignedAlloc(u8, alignment, mock_packet_data_static.len);
+    defer test_allocator.free(aligned_packet_buffer);
+    @memcpy(aligned_packet_buffer, &mock_packet_data_static);
+
+    const header = mockPcapHeader(@intCast(aligned_packet_buffer.len), @intCast(aligned_packet_buffer.len));
+    const packet_info = try capture.parsePacketInfo(header, aligned_packet_buffer.ptr);
+
+    try testing.expect(packet_info != null);
+    const info = packet_info.?;
+    try testing.expectEqual(common.Protocol.ICMP, info.protocol);
+    try testing.expectEqual(@as(u16, 0), info.source_port); // ICMP type 0
+    try testing.expectEqual(@as(u16, 0), info.dest_port);   // ICMP code 0
+}
+
 test "parsePacketInfo - ICMP with payload" {
     // Static mock data with ICMP echo request + payload
     const mock_packet_data_static: [50]u8 = [_]u8{
@@ -233,6 +263,47 @@ test "parsePacketInfo - ICMP with payload" {
     }
 }
 
+test "parsePacketInfo - ICMP destination unreachable" {
+    // static mock data with ICMP destination unreachable (Type 3, Code 1 - Host Unreachable)
+    const mock_packet_data_static: [50]u8 = [_]u8{
+        0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x08,0x00, // Eth
+        // IP Header (20 bytes)
+        0x45, 0x00, 0x00, 0x32, // Version/IHL, ToS, Total Length (50)
+        0x00, 0x01, 0x00, 0x00, // ID, Flags, Frag Offset
+        0x40, 0x01, 0x00, 0x00, // TTL (64), Protocol (1=ICMP), Checksum
+        10, 0, 0, 1, // Source IP (router)
+        192, 168, 1, 102, // Dest IP (client)
+        // ICMP Header (8 bytes, Type=3, Code=1)
+        0x03, 0x01, 0xab, 0xcd, // Type, Code, Checksum
+        0x00, 0x00, 0x00, 0x00, // Unused
+        // ICMP Payload (8 bytes - original packet header)
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    const alignment = @alignOf(capture.EthernetHeader);
+    const aligned_packet_buffer = try test_allocator.alignedAlloc(u8, alignment, mock_packet_data_static.len);
+    defer test_allocator.free(aligned_packet_buffer);
+    @memcpy(aligned_packet_buffer, &mock_packet_data_static);
+
+    const header = mockPcapHeader(@intCast(aligned_packet_buffer.len), @intCast(aligned_packet_buffer.len));
+    const packet_info = try capture.parsePacketInfo(header, aligned_packet_buffer.ptr);
+
+    try testing.expect(packet_info != null);
+    const info = packet_info.?;
+    try testing.expectEqual(common.Protocol.ICMP, info.protocol);
+    try testing.expectEqual(@as(u16, 3), info.source_port); // ICMP type 3
+    try testing.expectEqual(@as(u16, 1), info.dest_port);   // ICMP code 1
+    
+    // check that payload contains the original packet header
+    try testing.expect(info.payload != null);
+    if (info.payload) |payload| {
+        try testing.expectEqualSlices(u8, 
+            &[_]u8{0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00}, 
+            payload
+        );
+    }
+}
+
 test "parsePacketInfo - packet too small (Ethernet)" {
     const mock_packet_data: [10]u8 = undefined; // Less than Eth header
     const header = mockPcapHeader(@intCast(mock_packet_data.len), @intCast(mock_packet_data.len));
@@ -264,20 +335,18 @@ test "parsePacketInfo - packet too small (IP)" {
     try testing.expectError(capture.Error.InvalidPacketHeader, packet_info);
 }
 
-
-test "parsePacketInfo - packet too small (TCP)" {
+test "parsePacketInfo - packet too small (ICMP)" {
     // Static mock data
-    const mock_packet_data_static: [40]u8 = [_]u8{
+    const mock_packet_data_static: [38]u8 = [_]u8{
         0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x08,0x00, // Eth
         // IP Header (20 bytes)
-        0x45, 0x00, 0x00, 0x28, // Version/IHL, ToS, Total Length (40)
+        0x45, 0x00, 0x00, 0x26, // Version/IHL, ToS, Total Length (38)
         0x00, 0x01, 0x00, 0x00, // ID, Flags, Frag Offset
-        0x40, 0x06, 0x00, 0x00, // TTL (64), Protocol (6=TCP), Checksum
-        192, 168, 1, 100, // Source IP
-        8, 8, 8, 8, // Dest IP
-        // TCP Header (only 6 bytes provided)
-        0xc0, 0x01, 0x00, 0x50, // Source Port, Dest Port
-        0x00, 0x00, // Start of Seq Num
+        0x40, 0x01, 0x00, 0x00, // TTL (64), Protocol (1=ICMP), Checksum
+        192, 168, 1, 102, // Source IP
+        1, 1, 1, 1, // Dest IP
+        // ICMP Header (only 4 bytes provided, should be 8)
+        0x08, 0x00, 0xab, 0xcd,
     };
 
     // Allocate aligned buffer
@@ -293,6 +362,33 @@ test "parsePacketInfo - packet too small (TCP)" {
     try testing.expectError(capture.Error.InvalidPacketHeader, packet_info);
 }
 
+test "parsePacketInfo - packet too small (TCP)" {
+    // static mock data
+    const mock_packet_data_static: [40]u8 = [_]u8{
+        0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x08,0x00, // Eth
+        // IP Header (20 bytes)
+        0x45, 0x00, 0x00, 0x28, // Version/IHL, ToS, Total Length (40)
+        0x00, 0x01, 0x00, 0x00, // ID, Flags, Frag Offset
+        0x40, 0x06, 0x00, 0x00, // TTL (64), Protocol (6=TCP), Checksum
+        192, 168, 1, 100, // Source IP
+        8, 8, 8, 8, // Dest IP
+        // TCP Header (only 6 bytes provided)
+        0xc0, 0x01, 0x00, 0x50, // Source Port, Dest Port
+        0x00, 0x00, // Start of Seq Num
+    };
+
+    // alloc aligned buffer
+    const alignment = @alignOf(capture.EthernetHeader);
+    const aligned_packet_buffer = try test_allocator.alignedAlloc(u8, alignment, mock_packet_data_static.len);
+    defer test_allocator.free(aligned_packet_buffer);
+    @memcpy(aligned_packet_buffer, &mock_packet_data_static);
+
+    const header = mockPcapHeader(@intCast(aligned_packet_buffer.len), @intCast(aligned_packet_buffer.len));
+    // using aligned buffer pointer
+    const packet_info = capture.parsePacketInfo(header, aligned_packet_buffer.ptr);
+
+    try testing.expectError(capture.Error.InvalidPacketHeader, packet_info);
+}
 
 test "parsePacketInfo - non-IPv4 packet" {
     // Static mock data (only need Ethernet header part)

@@ -1240,18 +1240,32 @@ fn isPrivateIP(ip: [4]u8) bool {
 
 /// Detect payload patterns (signatures)
 fn detectPayloadPattern(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
-    if (conn_state) |conn| {
-        if (conn.payload_sample) |payload| {
-            // Only check TCP and UDP packets with payload
-            if (packet.protocol != .TCP and packet.protocol != .UDP) {
-                return false;
-            }
-            
-            // Check against all signatures
-            for (PAYLOAD_SIGNATURES) |sig| {
-                if (std.mem.indexOf(u8, payload, sig.pattern)) |_| {
-                    // Found a match
+    if (packet.payload) |direct_payload| {
+        // only checking TCP and UDP packets with payload
+        if (packet.protocol == .TCP or packet.protocol == .UDP) {
+            // check against all signatures
+            for (PAYLOAD_SIGNATURES) |sig|{
+                if (std.mem.indexOf(u8, direct_payload, sig.pattern)) |_| {
+                    // found a match
+                    log.info("Payload signature match: {s} (ID: {d})", .{sig.name, sig.id});
                     return true;
+                }
+            }
+        }
+    }
+
+    // check connection state payload sample as backup
+    if (conn_state) |conn| {
+        if (conn.payload_sample) |payload_sample| {
+            // check TCP and UDP packets
+            if (packet.protocol == .TCP or packet.protocol == .UDP) {
+                // check against all signatures
+                for (PAYLOAD_SIGNATURES) |sig| {
+                    if (std.mem.indexOf(u8, payload_sample, sig.pattern)) |_| {
+                        // found a match
+                        log.info("Connection payload signature match: {s} (ID: {d})", .{sig.name, sig.id});
+                        return true;
+                    }
                 }
             }
         }
