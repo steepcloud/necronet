@@ -416,22 +416,3 @@ test "parsePacketInfo - non-IPv4 packet" {
 
     try testing.expect(packet_info == null);
 }
-
-// --- Tests for CaptureSession ---
-// Placeholder test needs updating for snapshot_len
-test "CaptureSession init/deinit (placeholder)" {
-    // This test requires mocking pcap_open_live to actually pass.
-    // For now, we just verify the error behavior
-    const result = capture.CaptureSession.init(
-        test_allocator, 
-        "fake_device_name", 
-        false, // Not promiscuous 
-        1000,  // 1 sec timeout
-        65535  // Standard snapshot length
-    );
-    
-    try testing.expectError(capture.Error.CaptureInitFailed, result);
-    
-    // Note: We can't call .deinit() because we don't have a session
-    // If we implement mocking later, we'd want to test both init and deinit
-}

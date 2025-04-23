@@ -43,6 +43,7 @@ pub const HttpParser = struct {
     body_length: usize,
     is_request: bool,
     body: []u8,
+    previous_header_name: []const u8,
 
     pub const HttpParseState = enum {
         StartLine,
@@ -72,6 +73,7 @@ pub const HttpParser = struct {
             .body_length = 0,
             .is_request = true,
             .body = &[_]u8{},
+            .previous_header_name = &[_]u8{},
         };
         return parser;
     }
@@ -91,10 +93,19 @@ pub const HttpParser = struct {
                             var parts = std.mem.splitScalar(u8, line, ' ');
                             const version = parts.next() orelse return ParseError.MalformedPacket;
                             const status_code = parts.next() orelse return ParseError.MalformedPacket;
-                            const reason_phrase = std.mem.trim(u8, line[(status_code.ptr + status_code.len - line.ptr)..], "\r\n ");
-                            self.version = try self.allocator.dupe(u8, version);
+                            var reason_builder = std.ArrayList(u8).init(self.allocator);
+                            defer reason_builder.deinit();
+                            var first = true;
+                            while (parts.next()) |part| {
+                                if (!first) {
+                                    try reason_builder.append(' ');
+                                }
+                                try reason_builder.appendSlice(part);
+                                first = false;
+                            }
+                            self.version = try self.allocator.dupe(u8, std.mem.trimRight(u8, version, "\r"));
                             self.status_code = try self.allocator.dupe(u8, status_code);
-                            self.reason_phrase = try self.allocator.dupe(u8, reason_phrase);
+                            self.reason_phrase = try self.allocator.dupe(u8, std.mem.trim(u8, reason_builder.items, "\r\n"));
                             self.method = &[_]u8{};
                             self.uri = &[_]u8{};
                         } else {
@@ -106,7 +117,7 @@ pub const HttpParser = struct {
                             const version = parts.next() orelse return ParseError.MalformedPacket;
                             self.method = try self.allocator.dupe(u8, method);
                             self.uri = try self.allocator.dupe(u8, uri);
-                            self.version = try self.allocator.dupe(u8, version);
+                            self.version = try self.allocator.dupe(u8, std.mem.trimRight(u8, version, "\r"));
                             self.status_code = &[_]u8{};
                             self.reason_phrase = &[_]u8{};
                         }
@@ -120,17 +131,55 @@ pub const HttpParser = struct {
                     if (line.len == 0 or (line.len == 1 and line[0] == '\r')) {
                         i = line_end + 1;
                         self.state = .Body;
+                    } else if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) {
+                        // folded header
+                        if (self.previous_header_name.len == 0) return ParseError.MalformedPacket;
+                        if (self.headers.get(self.previous_header_name)) |prev_value| {
+                            const folded_content = std.mem.trim(u8, line, " \t\r");
+                            const new_value = try std.fmt.allocPrint(
+                                self.allocator,
+                                "{s} {s}",
+                                .{ prev_value, folded_content }
+                            );
+
+                            errdefer self.allocator.free(new_value);
+
+                            self.allocator.free(prev_value);
+                            
+                            try self.headers.put(self.previous_header_name, new_value);
+                        } else {
+                            return ParseError.MalformedPacket;
+                        }
+
+                        i = line_end + 1;
                     } else {
                         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return ParseError.MalformedPacket;
+                        
                         var name = line[0..colon];
-                        if (name.len > 0 and name[name.len - 1] == '\r') name = name[0 .. name.len - 1];
                         var value = line[colon + 1 ..];
+                        
+                        if (name.len > 0 and name[name.len - 1] == '\r') name = name[0 .. name.len - 1];
                         if (value.len > 0 and value[0] == ' ') value = value[1..];
                         if (value.len > 0 and value[value.len - 1] == '\r') value = value[0 .. value.len - 1];
+                        
                         const name_owned = try self.allocator.dupe(u8, name);
+                        errdefer self.allocator.free(name_owned);
+                        
                         const value_owned = try self.allocator.dupe(u8, value);
-                        try self.headers.put(name_owned, value_owned);
+                        errdefer self.allocator.free(value_owned);
+                        
+                        const fetch_put_result = try self.headers.fetchPut(name_owned, value_owned);
+                        if (fetch_put_result) |result_kv| {
+                            self.allocator.free(result_kv.value);
+                            self.allocator.free(name_owned);
+                            self.previous_header_name = result_kv.key;
+                        } else {
+                            self.previous_header_name = name_owned;
+                        }
+
+                        //self.previous_header_name = name_owned;
                         self.header_count += 1;
+                        
                         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
                             self.body_length = std.fmt.parseInt(usize, value, 10) catch 0;
                         }
@@ -155,16 +204,22 @@ pub const HttpParser = struct {
     fn reset(base: *ProtocolParser) void {
         const self: *HttpParser = @fieldParentPtr("base", base);
         self.state = .StartLine;
+
         if (self.method.len > 0) self.allocator.free(self.method);
         if (self.uri.len > 0) self.allocator.free(self.uri);
         if (self.version.len > 0) self.allocator.free(self.version);
         if (self.body.len > 0) self.allocator.free(self.body);
+        if (self.status_code.len > 0) self.allocator.free(self.status_code);
+        if (self.reason_phrase.len > 0) self.allocator.free(self.reason_phrase);
+
         self.method = &[_]u8{};
         self.uri = &[_]u8{};
         self.version = &[_]u8{};
         self.status_code = &[_]u8{};
         self.reason_phrase = &[_]u8{};
         self.body = &[_]u8{};
+        self.previous_header_name = &[_]u8{};
+
         var it = self.headers.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -175,7 +230,7 @@ pub const HttpParser = struct {
         self.body_length = 0;
     }
 
-    fn deinit(base: *ProtocolParser, allocator: Allocator) void {
+    pub fn deinit(base: *ProtocolParser, allocator: Allocator) void {
         const self: *HttpParser = @fieldParentPtr("base", base);
         reset(&self.base);
         self.headers.deinit();
@@ -252,6 +307,7 @@ pub const DnsParser = struct {
                 offset = ptr;
                 // Recursively parse at pointer location
                 const pointed = try self.parseName(data, &offset, depth + 1);
+                defer self.allocator.free(pointed);
                 try name_buf.appendSlice(pointed);
                 break;
             } else {
@@ -326,7 +382,7 @@ pub const DnsParser = struct {
                 28 => { // AAAA record
                     if (rdlength == 16) {
                         rdata_str = try std.fmt.allocPrint(self.allocator,
-                        "{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}",
+                        "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}",
                         .{ data[offset], data[offset+1], data[offset+2], data[offset+3],
                            data[offset+4], data[offset+5], data[offset+6], data[offset+7],
                            data[offset+8], data[offset+9], data[offset+10], data[offset+11],
@@ -364,7 +420,9 @@ pub const DnsParser = struct {
         self.questions.clearRetainingCapacity();
         for (self.answers.items) |answer| {
             self.allocator.free(answer.name);
-            self.allocator.free(answer.data);
+            if (answer.data.len > 0) {
+                self.allocator.free(answer.data);
+            }
         }
         self.answers.clearRetainingCapacity();
         self.transaction_id = 0;
@@ -373,7 +431,7 @@ pub const DnsParser = struct {
         self.answer_count = 0;
     }
 
-    fn deinit(base: *ProtocolParser, allocator: Allocator) void {
+    pub fn deinit(base: *ProtocolParser, allocator: Allocator) void {
         const self: *DnsParser = @fieldParentPtr("base", base);
         reset(&self.base);
         self.questions.deinit();

@@ -95,6 +95,7 @@ pub fn build(b: *std.Build) void {
     // add modules to the tests
     unit_tests.root_module.addImport("backend", backend_module);
     unit_tests.root_module.addImport("detection", detection_module);
+    unit_tests.root_module.addImport("parser", parser_module);
     unit_tests.root_module.addImport("ipc", ipc_module);
     unit_tests.root_module.addImport("common", common_module);
 

@@ -4,18 +4,15 @@ const common = @import("common");
 const detection = @import("detection");
 const capture = @import("backend");
 
-// Test allocator
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const test_allocator = gpa.allocator();
-
 test "Alert creation and deallocation" {
-    // Create an alert
+    const allocator = std.testing.allocator;
+    
     var alert = detection.Alert{
         .id = 1234,
         .timestamp = 1682371200, // Some timestamp
         .severity = .Medium,
-        .category = try test_allocator.dupe(u8, "Test Category"),
-        .message = try test_allocator.dupe(u8, "Test alert message"),
+        .category = try allocator.dupe(u8, "Test Category"),
+        .message = try allocator.dupe(u8, "Test alert message"),
         .source_ip = .{ 192, 168, 1, 100 },
         .dest_ip = .{ 10, 0, 0, 1 },
         .source_port = 12345,
@@ -34,11 +31,13 @@ test "Alert creation and deallocation" {
     try testing.expectEqual(common.Protocol.TCP, alert.protocol);
 
     // Test freeing resources
-    alert.deinit(test_allocator);
+    alert.deinit(allocator);
 }
 
 test "DetectionEngine initialization and deallocation" {
-    var engine = try detection.DetectionEngine.init(test_allocator);
+    const allocator = std.testing.allocator;
+
+    var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
 
     // Test that we can add rules
@@ -71,7 +70,9 @@ fn testRuleCondition(packet: capture.PacketInfo, _: ?*const detection.Connection
 }
 
 test "Connection state tracking" {
-    var engine = try detection.DetectionEngine.init(test_allocator);
+    const allocator = std.testing.allocator;
+
+    var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
 
     const packet1 = capture.PacketInfo{
@@ -102,7 +103,9 @@ test "Connection state tracking" {
 }
 
 test "Port scan detection" {
-    var engine = try detection.DetectionEngine.init(test_allocator);
+    const allocator = std.testing.allocator;
+
+    var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
 
     const dummy_data = [_]u8{};
@@ -140,7 +143,9 @@ test "Port scan detection" {
 }
 
 test "SYN flood detection" {
-    var engine = try detection.DetectionEngine.init(test_allocator);
+    const allocator = std.testing.allocator;
+
+    var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
     
     // First create a connection key
@@ -155,10 +160,10 @@ test "SYN flood detection" {
     // Create connection state that would trigger the detection
     var conn_state = detection.ConnectionState{
         .key = key,
-        .first_seen = std.time.timestamp() - 2, // 2 seconds ago (within time window)
+        .first_seen = std.time.timestamp(),
         .last_seen = std.time.timestamp(),
-        .packet_count = 25, // Above threshold
-        .byte_count = 1500,
+        .packet_count = 200, // >= threshold (200 in this case)
+        .byte_count = 12800,
         .packets_per_second = 12.5,
         .bytes_per_second = 750.0,
         .tcp_state = .SynSent, // Critical for SYN flood detection
@@ -186,7 +191,9 @@ test "SYN flood detection" {
 }
 
 test "Payload pattern detection" {
-    var engine = try detection.DetectionEngine.init(test_allocator);
+    const allocator = std.testing.allocator;
+
+    var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
 
     // Try multiple SQL injection patterns to increase chances of detection
