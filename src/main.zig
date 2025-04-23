@@ -207,13 +207,15 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
             std.debug.print("\n", .{});
 
             // --- Protocol parser integration ---
-            if (parser.parsePacket(std.head.page_allocator, packet, payload)) |proto_parser| {
+            if (parser.parsePacket(std.heap.page_allocator, packet, payload) catch null) |proto_parser| {
                 defer proto_parser.deinit(std.heap.page_allocator);
 
                 // HTTP
                 const http: *parser.HttpParser = @fieldParentPtr("base", proto_parser);
-                if (http.method.len > 0 and http.uri.len > 0) {
-                    std.debug.print("  HTTP: {s} {s}\n", .{http.method, http.uri});
+                if (http.is_request and http.method.len > 0 and http.uri.len > 0) {
+                    std.debug.print("  HTTP Request: {s} {s}\n", .{http.method, http.uri});
+                } else if (!http.is_request and http.status_code.len > 0 and http.reason_phrase.len > 0) {
+                    std.debug.print("  HTTP Response: {s} {s}\n", .{http.status_code, http.reason_phrase});
                 }
 
                 // DNS

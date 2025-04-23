@@ -36,6 +36,8 @@ pub const HttpParser = struct {
     method: []u8,
     uri: []u8,
     version: []u8,
+    status_code: []u8,
+    reason_phrase: []u8,
     headers: std.StringHashMap([]u8),
     header_count: usize,
     body_length: usize,
@@ -63,6 +65,8 @@ pub const HttpParser = struct {
             .method = &[_]u8{},
             .uri = &[_]u8{},
             .version = &[_]u8{},
+            .status_code = &[_]u8{},
+            .reason_phrase = &[_]u8{},
             .headers = std.StringHashMap([]u8).init(allocator),
             .header_count = 0,
             .body_length = 0,
@@ -82,20 +86,29 @@ pub const HttpParser = struct {
                     const line = data[i..line_end];
                     if (line.len > 0) {
                         if (std.mem.startsWith(u8, line, "HTTP/")) {
-                            self.is_request = false;
                             // Parse HTTP response: HTTP/1.1 200 OK
-                            const parts = std.mem.split(u8, line, " ");
-                            var iter = parts.iterator();
-                            self.version = try self.allocator.dupe(u8, iter.next().?);
-                            // status code and reason phrase could be parsed here if needed
+                            self.is_request = false;
+                            var parts = std.mem.splitScalar(u8, line, ' ');
+                            const version = parts.next() orelse return ParseError.MalformedPacket;
+                            const status_code = parts.next() orelse return ParseError.MalformedPacket;
+                            const reason_phrase = parts.next() orelse return ParseError.MalformedPacket;
+                            self.version = try self.allocator.dupe(u8, version);
+                            self.status_code = try self.allocator.dupe(u8, status_code);
+                            self.reason_phrase = try self.allocator.dupe(u8, reason_phrase);
+                            self.method = &[_]u8{};
+                            self.uri = &[_]u8{};
                         } else {
-                            self.is_request = true;
                             // Parse HTTP request: GET /path HTTP/1.1
-                            const parts = std.mem.split(u8, line, " ");
-                            var iter = parts.iterator();
-                            self.method = try self.allocator.dupe(u8, iter.next().?);
-                            self.uri = try self.allocator.dupe(u8, iter.next().?);
-                            self.version = try self.allocator.dupe(u8, iter.next().?);
+                            self.is_request = true;
+                            var parts = std.mem.splitScalar(u8, line, ' ');
+                            const method = parts.next() orelse return ParseError.MalformedPacket;
+                            const uri = parts.next() orelse return ParseError.MalformedPacket;
+                            const version = parts.next() orelse return ParseError.MalformedPacket;
+                            self.method = try self.allocator.dupe(u8, method);
+                            self.uri = try self.allocator.dupe(u8, uri);
+                            self.version = try self.allocator.dupe(u8, version);
+                            self.status_code = &[_]u8{};
+                            self.reason_phrase = &[_]u8{};
                         }
                     }
                     i = line_end + 1;
@@ -149,6 +162,8 @@ pub const HttpParser = struct {
         self.method = &[_]u8{};
         self.uri = &[_]u8{};
         self.version = &[_]u8{};
+        self.status_code = &[_]u8{};
+        self.reason_phrase = &[_]u8{};
         self.body = &[_]u8{};
         var it = self.headers.iterator();
         while (it.next()) |entry| {
@@ -162,7 +177,7 @@ pub const HttpParser = struct {
 
     fn deinit(base: *ProtocolParser, allocator: Allocator) void {
         const self: *HttpParser = @fieldParentPtr("base", base);
-        self.reset(&self.base);
+        reset(&self.base);
         self.headers.deinit();
         allocator.destroy(self);
     }
@@ -284,7 +299,7 @@ pub const DnsParser = struct {
             });
         }
 
-        // Parse answers (basic, no compression support)
+        // Parse answers
         for (0..self.answer_count) |_| {
             var name_offset = offset;
             const name = try self.parseName(data, &name_offset, 0);
@@ -331,7 +346,7 @@ pub const DnsParser = struct {
 
     fn deinit(base: *ProtocolParser, allocator: Allocator) void {
         const self: *DnsParser = @fieldParentPtr("base", base);
-        self.reset(&self.base);
+        reset(&self.base);
         self.questions.deinit();
         self.answers.deinit();
         allocator.destroy(self);
