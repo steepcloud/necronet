@@ -91,7 +91,7 @@ pub const HttpParser = struct {
                             var parts = std.mem.splitScalar(u8, line, ' ');
                             const version = parts.next() orelse return ParseError.MalformedPacket;
                             const status_code = parts.next() orelse return ParseError.MalformedPacket;
-                            const reason_phrase = parts.next() orelse return ParseError.MalformedPacket;
+                            const reason_phrase = std.mem.trim(u8, line[(status_code.ptr + status_code.len - line.ptr)..], "\r\n ");
                             self.version = try self.allocator.dupe(u8, version);
                             self.status_code = try self.allocator.dupe(u8, status_code);
                             self.reason_phrase = try self.allocator.dupe(u8, reason_phrase);
@@ -314,7 +314,36 @@ pub const DnsParser = struct {
             offset += 10;
 
             if (offset + rdlength > data.len) return ParseError.MalformedPacket;
-            const rdata = try self.allocator.dupe(u8, data[offset .. offset + rdlength]);
+            var rdata_str: []u8 = &[_]u8{};
+            switch(atype) {
+                1 => { // A record
+                    if (rdlength == 4) {
+                        // IPv4 address
+                        rdata_str = try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}",
+                            .{ data[offset], data[offset+1], data[offset+2], data[offset+3] });
+                    }
+                },
+                28 => { // AAAA record
+                    if (rdlength == 16) {
+                        rdata_str = try std.fmt.allocPrint(self.allocator,
+                        "{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}:{X:0>2}{X:0>2}",
+                        .{ data[offset], data[offset+1], data[offset+2], data[offset+3],
+                           data[offset+4], data[offset+5], data[offset+6], data[offset+7],
+                           data[offset+8], data[offset+9], data[offset+10], data[offset+11],
+                           data[offset+12], data[offset+13], data[offset+14], data[offset+15] }
+                        );
+                    }
+                },
+                5 => { // CNAME record
+                    var cname_offset = offset;
+                    rdata_str = try self.parseName(data, &cname_offset, 0);
+                },
+                else => {
+                    // default: just copy raw RDATA
+                    rdata_str = try self.allocator.dupe(u8, data[offset .. offset + rdlength]);
+                }
+            }
+
             offset += rdlength;
 
             try self.answers.append(DnsAnswer{
@@ -322,7 +351,7 @@ pub const DnsParser = struct {
                 .type = atype,
                 .class = aclass,
                 .ttl = ttl,
-                .data = rdata,
+                .data = rdata_str,
             });
         }
     }

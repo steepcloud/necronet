@@ -229,7 +229,15 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
                 if (dns.answers.items.len > 0) {
                     std.debug.print("  DNS Answers:\n", .{});
                     for (dns.answers.items) |a| {
-                        std.debug.print("    {s} (type {d})\n", .{a.name, a.type});
+                        std.debug.print("    {s} (type {d})", .{a.name, a.type});
+                        if (a.type == 1 or a.type == 28 or a.type == 5) { // A, AAAA, CNAME
+                            std.debug.print(" -> {s}", .{a.data});
+                        } else if (a.data.len > 0) {
+                            std.debug.print(" [RDATA: ", .{});
+                            for (a.data) |b| std.debug.print("{X:0>2} ", .{b});
+                            std.debug.print("]", .{});
+                        }
+                        std.debug.print("\n", .{});
                     }
                 }
             }

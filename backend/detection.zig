@@ -1162,11 +1162,11 @@ fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionStat
 pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         // Alert on connections that stay in SYN_SENT state with multiple packets
-        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 20;
+        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 200;
 
         const now = std.time.timestamp();
         const time_window = now - conn.first_seen;
-        const MIN_TIME_WINDOW: i64 = 3; // at least 3 seconds to avoid false positives
+        const MIN_TIME_WINDOW: i64 = 10; // at least 10 seconds to avoid false positives
         
         return conn.tcp_state == .SynSent and 
                conn.packet_count >= SYN_FLOOD_PACKET_THRESHOLD and
