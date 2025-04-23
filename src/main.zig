@@ -1,6 +1,7 @@
 const std = @import("std");
 const capture = @import("backend");
 const detection = @import("detection");
+const parser = @import("parser");
 const common = @import("common");
 
 pub fn main() !void {
@@ -204,6 +205,32 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
             }
             
             std.debug.print("\n", .{});
+
+            // --- Protocol parser integration ---
+            if (parser.parsePacket(std.head.page_allocator, packet, payload)) |proto_parser| {
+                defer proto_parser.deinit(std.heap.page_allocator);
+
+                // HTTP
+                const http: *parser.HttpParser = @fieldParentPtr("base", proto_parser);
+                if (http.method.len > 0 and http.uri.len > 0) {
+                    std.debug.print("  HTTP: {s} {s}\n", .{http.method, http.uri});
+                }
+
+                // DNS
+                const dns: *parser.DnsParser = @fieldParentPtr("base", proto_parser);
+                if (dns.questions.items.len > 0) {
+                    std.debug.print("  DNS Questions:\n", .{});
+                    for (dns.questions.items) |q| {
+                        std.debug.print("    {s} (type {d})\n", .{q.name, q.type});
+                    }
+                }
+                if (dns.answers.items.len > 0) {
+                    std.debug.print("  DNS Answers:\n", .{});
+                    for (dns.answers.items) |a| {
+                        std.debug.print("    {s} (type {d})\n", .{a.name, a.type});
+                    }
+                }
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const capture = @import("capture.zig");
+const capture = @import("backend");
 const common = @import("common");
 const Allocator = std.mem.Allocator;
 

@@ -4,7 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create modules for each component
     const backend_module = b.createModule(.{
         .root_source_file = b.path("backend/capture.zig"),
     });
@@ -14,6 +13,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("backend/detection.zig"),
     });
     detection_module.addIncludePath(b.path("."));
+
+    const parser_module = b.createModule(.{
+        .root_source_file = b.path("backend/parser.zig"),
+    });
+    parser_module.addIncludePath(b.path("."));
 
     if (target.result.os.tag == .windows) {
         backend_module.addIncludePath(b.path("npcap-sdk-1.15/Include"));
@@ -30,6 +34,8 @@ pub fn build(b: *std.Build) void {
     backend_module.addImport("common", common_module);
     detection_module.addImport("common", common_module);
     detection_module.addImport("backend", backend_module);
+    parser_module.addImport("common", common_module);
+    parser_module.addImport("backend", backend_module);
     ipc_module.addImport("common", common_module);
 
     // main executable
@@ -45,6 +51,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("detection", detection_module);
     exe.root_module.addImport("ipc", ipc_module);
     exe.root_module.addImport("common", common_module);
+    exe.root_module.addImport("parser", parser_module);
 
     // link with libpcap (Npcap on Windows)
     if (target.result.os.tag == .windows) {
