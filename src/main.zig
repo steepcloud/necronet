@@ -3,12 +3,31 @@ const capture = @import("backend");
 const detection = @import("detection");
 const parser = @import("parser");
 const common = @import("common");
+const ipc = @import("ipc");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var enable_gui = true;
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    // skipping first argument (executable name)
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--no-gui")) {
+            enable_gui = false;
+            std.debug.print("GUI disabled, running in CLI mode\n", .{});
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            std.debug.print("Necronet - Oddworld-themed Network Security Monitor\n\n", .{});
+            std.debug.print("Usage: necronet [options]\n\n", .{});
+            std.debug.print("Options:\n", .{});
+            std.debug.print("  --no-gui     Run in CLI mode without GUI\n", .{});
+            std.debug.print("  --help, -h   Show this help message\n", .{});
+            return;
+        }
+    }
     // List available interfaces
     const interfaces = try capture.getInterfaces(allocator);
     defer {
@@ -93,6 +112,19 @@ pub fn main() !void {
     var engine = try detection.DetectionEngine.init(allocator);
     defer engine.deinit();
 
+    // init IPC for GUI communication
+    var ipc_server: ?*ipc.IPCServer = null;
+    defer if (ipc_server) |server| server.deinit();
+
+    if (enable_gui) {
+        ipc_server = try ipc.IPCServer.init(allocator);
+        std.debug.print("IPC server initialized for UI communication\n", .{});
+
+        const ui = @import("ui");
+        _ = try std.Thread.spawn(.{}, ui.run, .{allocator});
+        std.debug.print("UI launched in separate thread\n", .{});
+    }
+
     // load default detection rules
     try engine.loadDefaultRules();
 
@@ -129,6 +161,44 @@ pub fn main() !void {
                     printAlert(alert);
 
                     @constCast(&alert).deinit(allocator);
+                }
+
+                if (enable_gui and ipc_server != null) {
+                    const flow_id = getFlowId(packet);
+
+                    const msg = @import("messages");
+                    
+                    // only send alert message if there is an alert for this packet
+                    if (try engine.analyzePacket(packet, packet_bytes)) |alert_result| {
+                        const slig_alert = try msg.fromDetectionAlert(allocator, alert_result);
+                        const alert_msg = msg.createSligAlertMsg(alert_count, slig_alert);
+
+                        _ = ipc_server.?.broadcast(&alert_msg) catch |err| {
+                            std.log.warn("Failed to send alert: {}", .{err});
+                        };
+                        
+                        @constCast(&alert_result).deinit(allocator);
+                    }
+                    
+                    const packet_event = msg.PacketEvent{
+                        .flow_id = flow_id,
+                        .timestamp = std.time.timestamp(),
+                        .protocol = packet.protocol,
+                        .source_ip = packet.source_ip,
+                        .source_port = packet.source_port,
+                        .dest_ip = packet.dest_ip,
+                        .dest_port = packet.dest_port,
+                        .packet_size = packet.captured_len,
+                        .tcp_flags = packet.tcp_flags,
+                        .ip_flags = packet.ip_flags,
+                        .payload = null, // not sending full payload to UI
+                    };
+
+                    // send packet event to UI
+                    const ipc_msg = msg.createPacketEventMsg(total_packets, packet_event);
+                    _ = ipc_server.?.broadcast(&ipc_msg) catch |err| {
+                        std.log.warn("Failed to send packet event: {}", .{err});
+                    };
                 }
 
                 // status update every 100 packets
@@ -302,4 +372,17 @@ fn printAlert(alert: detection.Alert) void {
     });
     std.debug.print("Protocol: {s}\n", .{@tagName(alert.protocol)});
     std.debug.print("{s}------------------------------------------{s}\n", .{color, reset});
+}
+
+fn getFlowId(packet: capture.PacketInfo) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    
+    // Hash source and destination
+    std.hash.autoHash(&hasher, packet.source_ip);
+    std.hash.autoHash(&hasher, packet.dest_ip);
+    std.hash.autoHash(&hasher, packet.source_port);
+    std.hash.autoHash(&hasher, packet.dest_port);
+    std.hash.autoHash(&hasher, @intFromEnum(packet.protocol));
+    
+    return hasher.final();
 }
