@@ -1,5 +1,5 @@
 const std = @import("std");
-
+// TODO: add tests for ipc/*.zig
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -31,12 +31,29 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("common/types.zig"),
     });
 
+    // add SDL dependency
+    const sdl_dep = b.dependency("sdl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const sdl_lib = sdl_dep.artifact("SDL3");
+
+    // UI module
+    const ui_module = b.createModule(.{
+        .root_source_file = b.path("ui/main.zig"),
+    });
+
     backend_module.addImport("common", common_module);
     detection_module.addImport("common", common_module);
     detection_module.addImport("backend", backend_module);
     parser_module.addImport("common", common_module);
     parser_module.addImport("backend", backend_module);
     ipc_module.addImport("common", common_module);
+    ui_module.addImport("common", common_module);
+    ui_module.addImport("ipc", ipc_module);
+
+    // UI module dependencies
+    ui_module.linkLibrary(sdl_lib);
 
     // main executable
     const exe = b.addExecutable(.{
@@ -52,6 +69,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("ipc", ipc_module);
     exe.root_module.addImport("common", common_module);
     exe.root_module.addImport("parser", parser_module);
+    exe.root_module.addImport("ui", ui_module);
+
+    exe.linkLibrary(sdl_lib);
 
     // link with libpcap (Npcap on Windows)
     if (target.result.os.tag == .windows) {
