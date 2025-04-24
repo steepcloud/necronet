@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("common", common_module);
     exe.root_module.addImport("parser", parser_module);
     exe.root_module.addImport("ui", ui_main_module);
-    exe.root_moulde.addImport("renderer", ui_renderer_module);
+    exe.root_module.addImport("renderer", ui_renderer_module);
     exe.root_module.addImport("ui_state", ui_state_module);
     exe.root_module.addImport("sprites", ui_sprites_module);
     exe.root_module.addImport("visualizer", ui_visualizer_module);
