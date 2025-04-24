@@ -2,7 +2,7 @@ const std = @import("std");
 const sdl = @cImport({
     @cInclude("SDL3/SDL.h");
 });
-const msg = @import("ipc").messages;
+const msg = @import("messages");
 const common = @import("common");
 
 // Visual representation of a network flow
@@ -96,45 +96,25 @@ pub const Visualizer = struct {
         return viz;
     }
     
-    // Load textures and assets
+    // Load textures and assets (with fallback to colored rectangles)
     fn loadAssets(self: *Visualizer) !void {
-        // Load pipe texture
-        self.pipe_texture = try loadTexture(
-            self.renderer, 
-            "assets/pipes/pipe_normal.png"
-        );
+        // Try to load textures, but don't fail if they're missing
+        self.pipe_texture = loadTexture(self.renderer, "assets/pipes/pipe_normal.png") catch |err| {
+            std.log.warn("Could not load pipe texture: {}, using fallback", .{err});
+            return; // Continue without textures
+        };
         
         // Load packet textures for different protocols
-        self.packet_textures[0] = try loadTexture(
-            self.renderer, 
-            "assets/pipes/packet_tcp.png"
-        );
-        self.packet_textures[1] = try loadTexture(
-            self.renderer, 
-            "assets/pipes/packet_udp.png"
-        );
-        self.packet_textures[2] = try loadTexture(
-            self.renderer, 
-            "assets/pipes/packet_icmp.png"
-        );
-        self.packet_textures[3] = try loadTexture(
-            self.renderer, 
-            "assets/pipes/packet_other.png"
-        );
+        self.packet_textures[0] = loadTexture(self.renderer, "assets/pipes/packet_tcp.png") catch null;
+        self.packet_textures[1] = loadTexture(self.renderer, "assets/pipes/packet_udp.png") catch null;
+        self.packet_textures[2] = loadTexture(self.renderer, "assets/pipes/packet_icmp.png") catch null;
+        self.packet_textures[3] = loadTexture(self.renderer, "assets/pipes/packet_other.png") catch null;
+        
         
         // Load slig textures for alerts
-        self.slig_textures[0] = try loadTexture(
-            self.renderer, 
-            "assets/threats/slig_normal.png"
-        );
-        self.slig_textures[1] = try loadTexture(
-            self.renderer, 
-            "assets/threats/slig_alert.png"
-        );
-        self.slig_textures[2] = try loadTexture(
-            self.renderer, 
-            "assets/threats/slig_critical.png"
-        );
+        self.slig_textures[0] = loadTexture(self.renderer, "assets/threats/slig_normal.png") catch null;
+        self.slig_textures[1] = loadTexture(self.renderer, "assets/threats/slig_alert.png") catch null;
+        self.slig_textures[2] = loadTexture(self.renderer, "assets/threats/slig_critical.png") catch null;
     }
     
     // Helper to load a texture
@@ -351,121 +331,127 @@ pub const Visualizer = struct {
     
     // Helper to render a flow
     fn renderFlow(self: *Visualizer, flow: *const NetworkFlow) !void {
-        // Draw the pipe
-        const src_rect = sdl.SDL_Rect{
-            .x = 0,
-            .y = 0,
-            .w = 100,
-            .h = 30,
-        };
-        
         const dest_rect = sdl.SDL_Rect{
             .x = @intFromFloat(flow.x),
             .y = @intFromFloat(flow.y),
             .w = @intFromFloat(flow.width),
             .h = @intFromFloat(flow.height),
         };
-        
-        // Set pipe color based on flow state
-        sdl.SDL_SetTextureColorMod(
-            self.pipe_texture.?, 
-            flow.color[0], 
-            flow.color[1], 
-            flow.color[2]
-        );
-        
-        _ = sdl.SDL_RenderCopy(self.renderer, self.pipe_texture.?, &src_rect, &dest_rect);
-        
-        // Draw packets in the pipe
-        for (flow.packets.items) |packet| {
-            try self.renderPacket(flow, &packet);
+
+        if (self.pipe_texture) |texture| {
+            // rendering using texture if available
+            const src_rect = sdl.SDL_Rect {
+                .x = 0,
+                .y = 0,
+                .w = 100,
+                .h = 30,
+            };
+
+                    
+            // Set pipe color based on flow state
+            sdl.SDL_SetTextureColorMod(
+                self.pipe_texture.?, 
+                flow.color[0], 
+                flow.color[1], 
+                flow.color[2]
+            );
+            
+            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+        } else {
+            // fallback: just draw a colored rectangle
+            sdl.SDL_SetRenderDrawColor(
+                self.renderer,
+                flow.color[0],
+                flow.color[1],
+                flow.color[2],
+                255
+            );
+            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
         }
-        
-        // Draw labels
-        self.renderText(
-            flow.x, 
-            flow.y - 20,
-            formatIpPort(flow.source_ip, flow.source_port)
-        );
-        
-        self.renderText(
-            flow.x + flow.width - 80, 
-            flow.y - 20,
-            formatIpPort(flow.dest_ip, flow.dest_port)
-        );
     }
     
-    // Helper to render a packet
     fn renderPacket(self: *Visualizer, flow: *const NetworkFlow, packet: *const VisualPacket) !void {
-        const texture_index = @min(3, @intFromEnum(packet.protocol));
-        const texture = self.packet_textures[texture_index].?;
-        
         const size = @max(10.0, packet.size * 20.0);
-        
         const x = flow.x + flow.width * packet.position - size / 2.0;
         const y = flow.y + flow.height / 2.0 - size / 2.0;
         
-        const src_rect = sdl.SDL_Rect{
-            .x = 0,
-            .y = 0,
-            .w = 32,
-            .h = 32,
+        const dest_rect = sdl.SDL_FRect{
+            .x = x,
+            .y = y,
+            .w = size,
+            .h = size,
         };
         
-        const dest_rect = sdl.SDL_Rect{
-            .x = @intFromFloat(x),
-            .y = @intFromFloat(y),
-            .w = @intFromFloat(size),
-            .h = @intFromFloat(size),
-        };
+        const texture_index = @min(3, @intFromEnum(packet.protocol));
         
-        // Set packet color
-        sdl.SDL_SetTextureColorMod(
-            texture, 
-            packet.color[0], 
-            packet.color[1], 
-            packet.color[2]
-        );
-        
-        _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+        if (self.packet_textures[texture_index]) |texture| {
+            // Render using texture if available
+            const src_rect = sdl.SDL_Rect{
+                .x = 0,
+                .y = 0,
+                .w = 32,
+                .h = 32,
+            };
+            
+            sdl.SDL_SetTextureColorMod(
+                texture, 
+                packet.color[0], 
+                packet.color[1], 
+                packet.color[2]
+            );
+            
+            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+        } else {
+            // Fallback: draw a circle or rectangle
+            sdl.SDL_SetRenderDrawColor(
+                self.renderer, 
+                packet.color[0], 
+                packet.color[1], 
+                packet.color[2], 
+                255
+            );
+            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
+        }
     }
-    
-    // Helper to render an alert
+
     fn renderAlert(self: *Visualizer, alert: *const SligAlert) !void {
-        // Choose texture based on severity
-        const texture_index = @min(2, alert.severity);
-        const texture = self.slig_textures[texture_index].?;
-        
         const size = 64.0 * alert.scale;
-        
-        const src_rect = sdl.SDL_Rect{
-            .x = @intCast(alert.frame * 64),
-            .y = 0,
-            .w = 64,
-            .h = 64,
+        const dest_rect = sdl.SDL_FRect{
+            .x = alert.x,
+            .y = alert.y,
+            .w = size,
+            .h = size,
         };
         
-        const dest_rect = sdl.SDL_Rect{
-            .x = @intFromFloat(alert.x),
-            .y = @intFromFloat(alert.y),
-            .w = @intFromFloat(size),
-            .h = @intFromFloat(size),
-        };
+        const texture_index = @min(2, alert.severity);
         
-        _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
-        
-        // Render alert text
-        self.renderText(
-            alert.x + size + 5, 
-            alert.y,
-            alert.category
-        );
-        
-        self.renderText(
-            alert.x + size + 5, 
-            alert.y + 20,
-            alert.message
-        );
+        if (self.slig_textures[texture_index]) |texture| {
+            // Render using texture if available
+            const src_rect = sdl.SDL_Rect{
+                .x = @intCast(alert.frame * 64),
+                .y = 0,
+                .w = 64,
+                .h = 64,
+            };
+            
+            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+        } else {
+            // Fallback: draw a distinctive shape for alerts
+            const severity_color = switch (alert.severity) {
+                0 => [4]u8{ 100, 200, 100, 255 }, // Green for low
+                1 => [4]u8{ 255, 200, 0, 255 },   // Yellow for medium
+                else => [4]u8{ 255, 0, 0, 255 },  // Red for high
+            };
+            
+            sdl.SDL_SetRenderDrawColor(
+                self.renderer, 
+                severity_color[0],
+                severity_color[1],
+                severity_color[2],
+                255
+            );
+            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
+        }
     }
     
     // Helper to render text (placeholder - would use SDL_ttf in full implementation)
@@ -508,6 +494,39 @@ pub const Visualizer = struct {
             .active_time = @as(f64, @floatFromInt(flow.active_time_ms)) / 1000.0,
             .last_update = flow.last_update,
         };
+    }
+
+    pub fn clearAlerts(self: *Visualizer) void {
+        // Free memory for alert strings
+        for (self.alerts.items) |alert| {
+            self.allocator.free(alert.category);
+            self.allocator.free(alert.message);
+        }
+        
+        // Clear the list
+        self.alerts.clearRetainingCapacity();
+    }
+
+    pub fn handleMouseClick(self: *Visualizer, x: i32, y: i32, is_left_click: bool) void {
+        // Find if we clicked on any flow or alert
+        _ = self;
+        _ = x;
+        _ = y;
+        _ = is_left_click;
+        // Will implement interaction logic later
+    }
+
+    pub fn handleResize(self: *Visualizer, width: i32, height: i32) void {
+        _ = self;
+        _ = width;
+        _ = height;
+        // Will adjust layout based on new dimensions later
+    }
+
+    pub fn setVisualizationMode(self: *Visualizer, mode: u8) void {
+        _ = self;
+        _ = mode;
+        // Will switch between different visualization styles later
     }
 };
 
