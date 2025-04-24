@@ -26,6 +26,9 @@ pub fn build(b: *std.Build) void {
     const ipc_module = b.createModule(.{
         .root_source_file = b.path("ipc/ipc.zig"),
     });
+    const ipc_messages_module = b.createModule(.{
+        .root_source_file = b.path("ipc/messages.zig"),
+    });
 
     const common_module = b.createModule(.{
         .root_source_file = b.path("common/types.zig"),
@@ -48,10 +51,14 @@ pub fn build(b: *std.Build) void {
     detection_module.addImport("backend", backend_module);
     parser_module.addImport("common", common_module);
     parser_module.addImport("backend", backend_module);
-    ipc_module.addImport("common", common_module);
+    ipc_module.addImport("messages", ipc_messages_module);
+    ipc_messages_module.addImport("common", common_module);
+    ipc_messages_module.addImport("backend", backend_module);
+    ipc_messages_module.addImport("detection", detection_module);
     ui_module.addImport("common", common_module);
     ui_module.addImport("ipc", ipc_module);
-
+    ui_module.addIncludePath(sdl_dep.path("include"));
+    
     // UI module dependencies
     ui_module.linkLibrary(sdl_lib);
 
@@ -67,6 +74,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("backend", backend_module);
     exe.root_module.addImport("detection", detection_module);
     exe.root_module.addImport("ipc", ipc_module);
+    exe.root_module.addImport("messages", ipc_messages_module);
     exe.root_module.addImport("common", common_module);
     exe.root_module.addImport("parser", parser_module);
     exe.root_module.addImport("ui", ui_module);

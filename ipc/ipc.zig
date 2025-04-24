@@ -5,7 +5,7 @@ const Thread = std.Thread;
 const windows = std.os.windows;
 const builtin = @import("builtin");
 
-const msg = @import("messages.zig");
+const msg = @import("messages");
 const Message = msg.Message;
 
 /// Error types that can occur during IPC operations
