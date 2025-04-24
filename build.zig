@@ -41,9 +41,21 @@ pub fn build(b: *std.Build) void {
     });
     const sdl_lib = sdl_dep.artifact("SDL3");
 
-    // UI module
-    const ui_module = b.createModule(.{
+    // UI modules
+    const ui_main_module = b.createModule(.{
         .root_source_file = b.path("ui/main.zig"),
+    });
+    const ui_renderer_module = b.createModule(.{
+        .root_source_file = b.path("ui/renderer.zig"),
+    });
+    const ui_state_module = b.createModule(.{
+        .root_source_file = b.path("ui/ui_state.zig"),
+    });
+    const ui_sprites_module = b.createModule(.{
+        .root_source_file = b.path("ui/sprites.zig"),
+    });
+    const ui_visualizer_module = b.createModule(.{
+        .root_source_file = b.path("ui/visualizer.zig"),
     });
 
     backend_module.addImport("common", common_module);
@@ -55,12 +67,17 @@ pub fn build(b: *std.Build) void {
     ipc_messages_module.addImport("common", common_module);
     ipc_messages_module.addImport("backend", backend_module);
     ipc_messages_module.addImport("detection", detection_module);
-    ui_module.addImport("common", common_module);
-    ui_module.addImport("ipc", ipc_module);
-    ui_module.addIncludePath(sdl_dep.path("include"));
+    ui_main_module.addImport("common", common_module);
+    ui_main_module.addImport("ipc", ipc_module);
+    ui_main_module.addImport("messages", ipc_messages_module);
+    ui_main_module.addImport("renderer", ui_renderer_module);
+    ui_main_module.addImport("ui_state", ui_state_module);
+    ui_main_module.addImport("sprites", ui_sprites_module);
+    ui_main_module.addImport("visualizer", ui_visualizer_module);
+    ui_main_module.addIncludePath(sdl_dep.path("include"));
     
     // UI module dependencies
-    ui_module.linkLibrary(sdl_lib);
+    ui_main_module.linkLibrary(sdl_lib);
 
     // main executable
     const exe = b.addExecutable(.{
@@ -77,7 +94,11 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("messages", ipc_messages_module);
     exe.root_module.addImport("common", common_module);
     exe.root_module.addImport("parser", parser_module);
-    exe.root_module.addImport("ui", ui_module);
+    exe.root_module.addImport("ui", ui_main_module);
+    exe.root_moulde.addImport("renderer", ui_renderer_module);
+    exe.root_module.addImport("ui_state", ui_state_module);
+    exe.root_module.addImport("sprites", ui_sprites_module);
+    exe.root_module.addImport("visualizer", ui_visualizer_module);
 
     exe.linkLibrary(sdl_lib);
 
