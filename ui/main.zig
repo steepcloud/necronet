@@ -267,6 +267,7 @@ fn processMessages(ctx: *UIContext) !void {
     const MAX_MESSAGES_PER_FRAME = 100; // Prevent processing too many in a single frame
     
     while (message_count < MAX_MESSAGES_PER_FRAME) {
+        std.debug.print("Before receiveMessage in processMessage\n", .{});
         const message = ctx.ipc_channel.receiveMessage() catch |err| {
             switch (err) {
                 ipc.IPCError.Disconnected => {
@@ -280,7 +281,7 @@ fn processMessages(ctx: *UIContext) !void {
                 else => return err,
             }
         } orelse break; // No more messages to process
-        
+        std.debug.print("After receiveMessage in processMessage\n", .{});
         message_count += 1;
 
         switch (message.header.msg_type) {
@@ -537,19 +538,26 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     // Main loop with proper frame timing
     while (ctx.running) {
+        // Handle SDL events
+        std.debug.print("Before handleEvents\n", .{});
+        handleEvents(&ctx);
+        std.debug.print("After handleEvents\n", .{});
+
         const frame_start = sdl.SDL_GetTicks();
         
         // Check IPC connection periodically
+        std.debug.print("Before checkConnectionStatus\n", .{});
         try ctx.checkConnectionStatus();
+        std.debug.print("After checkConnectionStatus\n", .{});
         
         // Process IPC messages from backend
+        std.debug.print("Before processMessages\n", .{});
         processMessages(&ctx) catch |err| {
             std.log.err("Error processing messages: {}", .{err});
             // Continue running despite errors
         };
+        std.debug.print("After processMessages\n", .{});
         
-        // Handle SDL events
-        handleEvents(&ctx);
         
         // Calculate delta time
         const current_time = sdl.SDL_GetTicks();
@@ -561,9 +569,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
         ctx.state.update(delta_sec);
         
         // Update visualization
+        std.debug.print("Before ctx.visualizer.update\n", .{});
         ctx.visualizer.update(delta_sec) catch |err| {
             std.log.err("Error updating visualizer: {}", .{err});
         };
+        std.debug.print("After ctx.visualizer.update\n", .{});
         
         // Render frame
         _ = sdl.SDL_SetRenderDrawColor(
@@ -576,14 +586,18 @@ pub fn run(allocator: std.mem.Allocator) !void {
         _ = sdl.SDL_RenderClear(ctx.renderer);
         
         // Render visualization
+        std.debug.print("Before ctx.visualizer.render\n", .{});
         ctx.visualizer.render() catch |err| {
             std.log.err("Error rendering visualization: {}", .{err});
         };
+        std.debug.print("Before ctx.visualizer.after\n", .{});
         
         // Render UI overlays
+        std.debug.print("Before renderUIOverlay\n", .{});
         renderUIOverlay(&ctx, delta_sec) catch |err| {
             std.log.err("Error rendering UI overlay: {}", .{err});
         };
+        std.debug.print("After renderUIOverlay\n", .{});
         
         // Present final frame
         _ = sdl.SDL_RenderPresent(ctx.renderer);

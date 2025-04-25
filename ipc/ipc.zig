@@ -445,10 +445,17 @@ pub const IPCChannel = struct {
                 // First read the 4-byte length prefix
                 var length_buf: [4]u8 = undefined;
                 const bytes_read = if (use_socket) 
-                    try self.socket_reader.?.readAll(&length_buf)
+                    self.socket_reader.?.read(&length_buf) catch |err| {
+                        if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                        return err;
+                    }
                 else
-                    try self.reader.?.readAll(&length_buf);
+                    self.reader.?.read(&length_buf) catch |err| {
+                        if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                        return err;
+                    };
                 
+                if (bytes_read == 0) return null; // no data available
                 if (bytes_read < 4) {
                     return IPCError.ReceiveFailed;
                 }
@@ -461,11 +468,22 @@ pub const IPCChannel = struct {
                     return IPCError.BufferTooSmall;
                 }
                 
-                // Read the JSON message
-                const json_bytes_read = if (use_socket)
-                    try self.socket_reader.?.readAll(self.read_buffer[0..msg_len])
-                else
-                    try self.reader.?.readAll(self.read_buffer[0..msg_len]);
+                var total_read: usize = 0;
+                while (total_read < msg_len) {
+                    const n = if (use_socket)
+                        self.socket_reader.?.read(self.read_buffer[total_read..msg_len]) catch |err| {
+                            if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                            return err;
+                        }
+                    else
+                        self.reader.?.read(self.read_buffer[total_read..msg_len]) catch |err| {
+                            if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                            return err;
+                        };
+                    if (n == 0) return null; // not enough data yet
+                    total_read += n;
+                }
+                const json_bytes_read = total_read;
 
                 if (json_bytes_read < msg_len) {
                     return IPCError.ReceiveFailed;
@@ -486,10 +504,17 @@ pub const IPCChannel = struct {
                 // For binary format, we need a fixed-size header first
                 const header_size = @sizeOf(msg.MessageHeader);
                 const header_bytes_read = if (use_socket)
-                    try self.socket_reader.?.readAll(self.read_buffer[0..header_size])
+                    self.socket_reader.?.read(self.read_buffer[0..header_size]) catch |err| {
+                        if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                        return err;
+                    }
                 else
-                    try self.reader.?.readAll(self.read_buffer[0..header_size]);
+                    self.reader.?.read(self.read_buffer[0..header_size]) catch |err| {
+                        if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                        return err;
+                    };
 
+                if (header_bytes_read == 0) return null; // no data available
                 if (header_bytes_read < header_size) {
                     return IPCError.ReceiveFailed;
                 }
@@ -506,11 +531,22 @@ pub const IPCChannel = struct {
                 
                 // Read the rest of the message
                 const body_size = total_size - header_size;
-                const body_bytes_read = if (use_socket)
-                    try self.socket_reader.?.readAll(self.read_buffer[header_size..total_size])
-                else
-                    try self.reader.?.readAll(self.read_buffer[header_size..total_size]);
-                
+                var total_read: usize = 0;
+                while (total_read < body_size) {
+                    const n = if (use_socket)
+                        self.socket_reader.?.read(self.read_buffer[header_size + total_read .. header_size + body_size]) catch |err| {
+                            if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                            return err;
+                        }
+                    else
+                        self.reader.?.read(self.read_buffer[header_size + total_read .. header_size + body_size]) catch |err| {
+                            if (err == error.WouldBlock or err == error.WouldBlockOrEof) return null;
+                            return err;
+                        };
+                    if (n == 0) return null; // not enough data yet
+                    total_read += n;
+                }
+                const body_bytes_read = total_read;
                 if (body_bytes_read < body_size) {
                     return IPCError.ReceiveFailed;
                 }
