@@ -107,12 +107,13 @@ pub const Renderer = struct {
     
     /// Initialize renderer with SDL renderer
     pub fn init(allocator: std.mem.Allocator, sdl_renderer: *sdl.SDL_Renderer) !Renderer {
-        var width: i32 = undefined;
-        var height: i32 = undefined;
+        var width: i32 = 800;
+        var height: i32 = 600;
         
-        if (sdl.SDL_GetRenderSize(sdl_renderer, &width, &height) != 0) {
-            std.log.err("Failed to get renderer size: {s}", .{sdl.SDL_GetError()});
-            return RendererError.ResourceInitFailed;
+        if (sdl.SDL_GetCurrentRenderOutputSize(sdl_renderer, &width, &height)) {
+            std.log.warn("Failed to get renderer size, using defaults ({}x{})", .{width, height});
+            // continue with default size instead of failing
+            //return RendererError.ResourceInitFailed;
         }
         
         return Renderer{
@@ -139,7 +140,7 @@ pub const Renderer = struct {
             self.background_color.a
         );
         
-        if (sdl.SDL_RenderClear(self.sdl_renderer) != 0) {
+        if (sdl.SDL_RenderClear(self.sdl_renderer)) {
             std.log.err("Failed to clear renderer: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -147,14 +148,14 @@ pub const Renderer = struct {
 
     /// Present the rendered content to the screen
     pub fn present(self: *Renderer) void {
-        sdl.SDL_RenderPresent(self.sdl_renderer);
+        _ = sdl.SDL_RenderPresent(self.sdl_renderer);
     }
 
     /// Set current drawing color
     pub fn setDrawColor(self: *Renderer, color: Color) !void {
         if (sdl.SDL_SetRenderDrawColor(
             self.sdl_renderer, color.r, color.g, color.b, color.a
-        ) != 0) {
+        )) {
             std.log.err("Failed to set render color: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -165,7 +166,7 @@ pub const Renderer = struct {
         try self.setDrawColor(color);
         
         const sdl_rect = rect.toSDLRect();
-        if (sdl.SDL_RenderFillRect(self.sdl_renderer, &sdl_rect) != 0) {
+        if (sdl.SDL_RenderFillRect(self.sdl_renderer, &sdl_rect)) {
             std.log.err("Failed to render filled rect: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -186,7 +187,7 @@ pub const Renderer = struct {
     pub fn drawLine(self: *Renderer, x1: f32, y1: f32, x2: f32, y2: f32, color: Color) !void {
         try self.setDrawColor(color);
         
-        if (sdl.SDL_RenderLine(self.sdl_renderer, x1, y1, x2, y2) != 0) {
+        if (sdl.SDL_RenderLine(self.sdl_renderer, x1, y1, x2, y2)) {
             std.log.err("Failed to render line: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -206,7 +207,7 @@ pub const Renderer = struct {
     pub fn drawLines(self: *Renderer, points: []const sdl.SDL_FPoint, color: Color) !void {
         try self.setDrawColor(color);
         
-        if (sdl.SDL_RenderLines(self.sdl_renderer, points.ptr, @intCast(points.len)) != 0) {
+        if (sdl.SDL_RenderLines(self.sdl_renderer, points.ptr, @intCast(points.len))) {
             std.log.err("Failed to render lines: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -270,7 +271,7 @@ pub const Renderer = struct {
 
     /// Draw a texture at specified position
     pub fn drawTexture(self: *Renderer, texture: *sdl.SDL_Texture, src_rect: ?sdl.SDL_FRect, dest_rect: sdl.SDL_FRect) !void {
-        if (sdl.SDL_RenderTexture(self.sdl_renderer, texture, if (src_rect) |r| &r else null, &dest_rect) != 0) {
+        if (sdl.SDL_RenderTexture(self.sdl_renderer, texture, if (src_rect) |r| &r else null, &dest_rect)) {
             std.log.err("Failed to render texture: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }
@@ -364,7 +365,7 @@ pub const Renderer = struct {
         var width: i32 = undefined;
         var height: i32 = undefined;
         
-        if (sdl.SDL_GetRenderSize(self.sdl_renderer, &width, &height) != 0) {
+        if (sdl.SDL_GetCurrentRenderOutputSize(self.sdl_renderer, &width, &height)) {
             std.log.err("Failed to update renderer size: {s}", .{sdl.SDL_GetError()});
             return RendererError.ResourceInitFailed;
         }
@@ -477,7 +478,7 @@ pub const Renderer = struct {
 
     /// Helper function to draw a horizontal line efficiently
     fn _drawHorizontalLine(self: *Renderer, x1: f32, x2: f32, y: f32) !void {
-        if (sdl.SDL_RenderLine(self.sdl_renderer, x1, y, x2, y) != 0) {
+        if (sdl.SDL_RenderLine(self.sdl_renderer, x1, y, x2, y)) {
             std.log.err("Failed to render horizontal line: {s}", .{sdl.SDL_GetError()});
             return RendererError.RenderingFailed;
         }

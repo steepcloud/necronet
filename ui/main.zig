@@ -211,7 +211,7 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
     errdefer sdl.SDL_DestroyRenderer(renderer_context);
 
     // custom renderer
-    const ui_renderer= try renderer.Renderer.init(allocator, renderer_context);
+    const ui_renderer= try renderer.Renderer.init(allocator, @ptrCast(renderer_context));
 
     _ = sdl.SDL_SetRenderVSync(renderer_context, 1);
     // Set blend mode for transparency
@@ -570,7 +570,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         std.debug.print("After ctx.visualizer.update\n", .{});
         
         // Render frame
-        try ctx.ui_renderer.setBackgroundColor(renderer.Color{
+        ctx.ui_renderer.setBackgroundColor(renderer.Color{
             .r = THEME.COLORS.BACKGROUND[0],
             .g = THEME.COLORS.BACKGROUND[1],
             .b = THEME.COLORS.BACKGROUND[2],

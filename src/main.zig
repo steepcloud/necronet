@@ -5,12 +5,17 @@ const parser = @import("parser");
 const common = @import("common");
 const ipc = @import("ipc");
 
+var enable_gui = true;
+
+// init alert counters
+var total_packets: u32 = 0;
+var alert_count: u32 = 0;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var enable_gui = true;
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -128,10 +133,6 @@ pub fn main() !void {
     // load default detection rules
     try engine.loadDefaultRules();
 
-    // init alert counters
-    var total_packets: u32 = 0;
-    var alert_count: u32 = 0;
-
     // Capture packets in a loop
     std.debug.print("Press Ctrl+C to stop capturing\n\n", .{});
     std.debug.print("Starting packet capture with intrusion detection...\n", .{});
@@ -225,6 +226,14 @@ pub fn main() !void {
 }
 
 fn printPacketInfo(packet: capture.PacketInfo) void {
+    if (enable_gui) {
+        if (total_packets % 1000 == 0) {
+            std.debug.print("\n--- Stats: {d} packets processed, {d} alerts generated ---\n\n", 
+                .{total_packets, alert_count});
+        }
+        return;
+    }
+
     // Protocol-specific display
     switch (packet.protocol) {
         .TCP, .UDP => {
@@ -324,6 +333,10 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
 }
 
 fn printAlert(alert: detection.Alert) void {
+    if (enable_gui) {
+        std.debug.print("\n[!] ALERT: {s}\n", .{alert.message});
+        return;
+    }
     // get severity color
     const color = switch (alert.severity) {
         .Low => "\x1b[34m", // blue

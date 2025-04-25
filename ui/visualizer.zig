@@ -113,26 +113,26 @@ pub const Visualizer = struct {
     // Load textures and assets (with fallback to colored rectangles)
     fn loadAssets(self: *Visualizer) !void {
         // Try to load textures, but don't fail if they're missing
-        self.pipe_texture = loadTexture(self.renderer, "assets/pipes/pipe_normal.png") catch |err| {
+        self.pipe_texture = loadTexture(&self.renderer, "assets/pipes/pipe_normal.png") catch |err| {
             std.log.warn("Could not load pipe texture: {}, using fallback", .{err});
             return; // Continue without textures
         };
         
         // Load packet textures for different protocols
-        self.packet_textures[0] = loadTexture(self.renderer, "assets/pipes/packet_tcp.png") catch null;
-        self.packet_textures[1] = loadTexture(self.renderer, "assets/pipes/packet_udp.png") catch null;
-        self.packet_textures[2] = loadTexture(self.renderer, "assets/pipes/packet_icmp.png") catch null;
-        self.packet_textures[3] = loadTexture(self.renderer, "assets/pipes/packet_other.png") catch null;
+        self.packet_textures[0] = loadTexture(&self.renderer, "assets/pipes/packet_tcp.png") catch null;
+        self.packet_textures[1] = loadTexture(&self.renderer, "assets/pipes/packet_udp.png") catch null;
+        self.packet_textures[2] = loadTexture(&self.renderer, "assets/pipes/packet_icmp.png") catch null;
+        self.packet_textures[3] = loadTexture(&self.renderer, "assets/pipes/packet_other.png") catch null;
         
         
         // Load slig textures for alerts
-        self.slig_textures[0] = loadTexture(self.renderer, "assets/threats/slig_normal.png") catch null;
-        self.slig_textures[1] = loadTexture(self.renderer, "assets/threats/slig_alert.png") catch null;
-        self.slig_textures[2] = loadTexture(self.renderer, "assets/threats/slig_critical.png") catch null;
+        self.slig_textures[0] = loadTexture(&self.renderer, "assets/threats/slig_normal.png") catch null;
+        self.slig_textures[1] = loadTexture(&self.renderer, "assets/threats/slig_alert.png") catch null;
+        self.slig_textures[2] = loadTexture(&self.renderer, "assets/threats/slig_critical.png") catch null;
     }
     
     // Helper to load a texture
-    fn loadTexture(renderer: rend.Renderer, path: [*:0]const u8) !*sdl.SDL_Texture {
+    fn loadTexture(renderer: *rend.Renderer, path: [*:0]const u8) !*sdl.SDL_Texture {
         return renderer.loadTexture(path) catch |err| {
             std.log.err("Failed to load texture {s}: {}", .{path, err});
             return error.ImageLoadFailed;
