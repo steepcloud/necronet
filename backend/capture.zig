@@ -40,6 +40,9 @@ pub const PacketInfo = struct {
     timestamp_usec: i64, // for precision
     checksum: u16,
     payload: ?[]const u8,
+    tcp_flags: u8 = 0, // TCP flags (SYN, ACK, etc.)
+    ip_flags: u8 = 0, //IP flags (fragmentation, etc.)
+    flow_id: ?u64 = null, // optional flow ID for tracking
 };
 
 pub const EthernetHeader = extern struct {
@@ -489,6 +492,8 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
 
     var payload_offset: usize = 0;
     var payload_length: usize = 0;
+    var tcp_flags: u8 = 0;
+    var ip_flags: u8 = 0;
 
     switch(protocol_type) {
         .TCP => {
@@ -502,6 +507,20 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
                 if (payload_offset < caplen) {
                     payload_length = caplen - payload_offset;
                 }
+
+                if (tcp_header.flagFIN()) tcp_flags |= 0x01;
+                if (tcp_header.flagSYN()) tcp_flags |= 0x02;
+                if (tcp_header.flagRST()) tcp_flags |= 0x04;
+                if (tcp_header.flagPSH()) tcp_flags |= 0x08;
+                if (tcp_header.flagACK()) tcp_flags |= 0x10;
+                if (tcp_header.flagURG()) tcp_flags |= 0x20;
+                if (tcp_header.flagECE()) tcp_flags |= 0x40;
+                if (tcp_header.flagCWR()) tcp_flags |= 0x80;
+
+                const ip_flags_frag = std.mem.readInt(u16, std.mem.asBytes(&ip_header.flags_fragment_offset), Endian.big);
+                if ((ip_flags_frag & 0x4000) != 0) ip_flags |= 0x01; // Don't Fragment
+                if ((ip_flags_frag & 0x2000) != 0) ip_flags |= 0x02; // More Fragments
+                if ((ip_flags_frag & 0x1FFF) != 0) ip_flags |= 0x04; // Fragment Offset (if non-zero)
             }
         },
         .UDP => {
@@ -539,6 +558,8 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         .timestamp_usec = header.ts.tv_usec,
         .checksum = transport_checksum,
         .payload = payload_slice,
+        .tcp_flags = tcp_flags,
+        .ip_flags = ip_flags,
     };
 }
 

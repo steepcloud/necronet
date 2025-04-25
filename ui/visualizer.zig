@@ -69,11 +69,21 @@ pub const Visualizer = struct {
     pipe_texture: ?*sdl.SDL_Texture,
     packet_textures: [4]?*sdl.SDL_Texture,
     slig_textures: [3]?*sdl.SDL_Texture,
+    view_mode: ViewMode,
     
     // Layout parameters
     layout_columns: u32,
     pipe_spacing: f32,
     pipe_length: f32,
+
+    visualization_mode: u8,
+    animation_time: f32,
+
+    pub const ViewMode = enum {
+        Overview,
+        FlowDetail,
+        AlertsOnly,
+    };
     
     // Create a new visualizer
     pub fn create(allocator: std.mem.Allocator, renderer: *sdl.SDL_Renderer) !*Visualizer {
@@ -86,9 +96,12 @@ pub const Visualizer = struct {
             .pipe_texture = null,
             .packet_textures = [_]?*sdl.SDL_Texture{null} ** 4,
             .slig_textures = [_]?*sdl.SDL_Texture{null} ** 3,
+            .view_mode = .Overview,
             .layout_columns = 4,
             .pipe_spacing = 20,
             .pipe_length = 200,
+            .visualization_mode = 0,
+            .animation_time = 0,
         };
         
         try viz.loadAssets();
@@ -119,10 +132,18 @@ pub const Visualizer = struct {
     
     // Helper to load a texture
     fn loadTexture(renderer: *sdl.SDL_Renderer, path: [*:0]const u8) !*sdl.SDL_Texture {
-        const texture = sdl.SDL_CreateTextureFromFile(renderer, path) orelse {
-            std.log.err("Failed to load texture {s}: {s}", .{path, sdl.SDL_GetError()});
-            return error.TextureLoadFailed;
+        // Using SDL_image for PNG support
+        const surface = sdl.SDL_LoadBMP(path) orelse {
+            std.log.err("Failed to load image {s}: {s}", .{path, sdl.SDL_GetError()});
+            return error.ImageLoadFailed;
         };
+        defer sdl.SDL_DestroySurface(surface);
+        
+        const texture = sdl.SDL_CreateTextureFromSurface(renderer, surface) orelse {
+            std.log.err("Failed to create texture from {s}: {s}", .{path, sdl.SDL_GetError()});
+            return error.TextureCreateFailed;
+        };
+        
         return texture;
     }
     
@@ -258,7 +279,7 @@ pub const Visualizer = struct {
             
             // Animate frame
             if (alert.animated) {
-                alert.frame = @intCast((std.time.timestamp() - alert.creation_time) % 4);
+                alert.frame = @intCast(@mod(std.time.timestamp() - alert.creation_time, 4));
             }
             
             // Remove alerts after 10 seconds
@@ -331,42 +352,42 @@ pub const Visualizer = struct {
     
     // Helper to render a flow
     fn renderFlow(self: *Visualizer, flow: *const NetworkFlow) !void {
-        const dest_rect = sdl.SDL_Rect{
-            .x = @intFromFloat(flow.x),
-            .y = @intFromFloat(flow.y),
-            .w = @intFromFloat(flow.width),
-            .h = @intFromFloat(flow.height),
+        const dest_rect = sdl.SDL_FRect{
+            .x = flow.x,
+            .y = flow.y,
+            .w = flow.width,
+            .h = flow.height,
         };
 
         if (self.pipe_texture) |texture| {
             // rendering using texture if available
-            const src_rect = sdl.SDL_Rect {
-                .x = 0,
-                .y = 0,
-                .w = 100,
-                .h = 30,
+            const src_rect = sdl.SDL_FRect {
+                .x = 0.0,
+                .y = 0.0,
+                .w = 100.0,
+                .h = 30.0,
             };
 
                     
             // Set pipe color based on flow state
-            sdl.SDL_SetTextureColorMod(
+            _ = sdl.SDL_SetTextureColorMod(
                 self.pipe_texture.?, 
                 flow.color[0], 
                 flow.color[1], 
                 flow.color[2]
             );
             
-            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
         } else {
             // fallback: just draw a colored rectangle
-            sdl.SDL_SetRenderDrawColor(
+            _ = sdl.SDL_SetRenderDrawColor(
                 self.renderer,
                 flow.color[0],
                 flow.color[1],
                 flow.color[2],
                 255
             );
-            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
+            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
         }
     }
     
@@ -386,21 +407,21 @@ pub const Visualizer = struct {
         
         if (self.packet_textures[texture_index]) |texture| {
             // Render using texture if available
-            const src_rect = sdl.SDL_Rect{
-                .x = 0,
-                .y = 0,
-                .w = 32,
-                .h = 32,
+            const src_rect = sdl.SDL_FRect{
+                .x = 0.0,
+                .y = 0.0,
+                .w = 32.0,
+                .h = 32.0,
             };
             
-            sdl.SDL_SetTextureColorMod(
+            _ = sdl.SDL_SetTextureColorMod(
                 texture, 
                 packet.color[0], 
                 packet.color[1], 
                 packet.color[2]
             );
             
-            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
         } else {
             // Fallback: draw a circle or rectangle
             sdl.SDL_SetRenderDrawColor(
@@ -410,7 +431,7 @@ pub const Visualizer = struct {
                 packet.color[2], 
                 255
             );
-            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
+            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
         }
     }
 
@@ -427,14 +448,14 @@ pub const Visualizer = struct {
         
         if (self.slig_textures[texture_index]) |texture| {
             // Render using texture if available
-            const src_rect = sdl.SDL_Rect{
-                .x = @intCast(alert.frame * 64),
-                .y = 0,
-                .w = 64,
-                .h = 64,
+            const src_rect = sdl.SDL_FRect{
+                .x = @as(f32, @floatFromInt(alert.frame)) * 64.0,
+                .y = 0.0,
+                .w = 64.0,
+                .h = 64.0,
             };
             
-            _ = sdl.SDL_RenderCopy(self.renderer, texture, &src_rect, &dest_rect);
+            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
         } else {
             // Fallback: draw a distinctive shape for alerts
             const severity_color = switch (alert.severity) {
@@ -443,14 +464,14 @@ pub const Visualizer = struct {
                 else => [4]u8{ 255, 0, 0, 255 },  // Red for high
             };
             
-            sdl.SDL_SetRenderDrawColor(
+            _ = sdl.SDL_SetRenderDrawColor(
                 self.renderer, 
                 severity_color[0],
                 severity_color[1],
                 severity_color[2],
                 255
             );
-            _ = sdl.SDL_RenderFillRectF(self.renderer, &dest_rect);
+            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
         }
     }
     
@@ -538,7 +559,7 @@ fn protocolToColor(protocol: common.Protocol) [4]u8 {
         .ICMP => [_]u8{ 255, 150, 0, 255 },   // Orange
         .HTTP => [_]u8{ 150, 0, 255, 255 },   // Purple
         .DNS => [_]u8{ 255, 255, 0, 255 },    // Yellow
-        .UNKNOWN => [_]u8{ 150, 150, 150, 255 }, // Gray
+        .Unknown => [_]u8{ 150, 150, 150, 255 }, // Gray
     };
 }
 

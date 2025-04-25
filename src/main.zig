@@ -189,8 +189,16 @@ pub fn main() !void {
                         .dest_ip = packet.dest_ip,
                         .dest_port = packet.dest_port,
                         .packet_size = packet.captured_len,
-                        .tcp_flags = packet.tcp_flags,
-                        .ip_flags = packet.ip_flags,
+                        .flags = .{
+                            .syn = (packet.tcp_flags & 0x02) != 0,
+                            .ack = (packet.tcp_flags & 0x10) != 0,
+                            .fin = (packet.tcp_flags & 0x01) != 0,
+                            .rst = (packet.tcp_flags & 0x04) != 0,
+                            .psh = (packet.tcp_flags & 0x08) != 0,
+                            .urg = (packet.tcp_flags & 0x20) != 0,
+                            .fragmented = (packet.ip_flags & 0x01) != 0,
+                            .retransmission = false, // TODO: implement retransmission detection
+                        },
                         .payload = null, // not sending full payload to UI
                     };
 

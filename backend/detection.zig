@@ -41,6 +41,8 @@ pub const Alert = struct {
     dest_port: u16,
     /// Protocol type
     protocol: common.Protocol,
+    /// Associated flow ID (optional)
+    flow_id: ?u64 = null,
     
     /// Free memory allocated for alert fields
     pub fn deinit(self: *Alert, allocator: Allocator) void {

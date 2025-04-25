@@ -74,7 +74,13 @@ pub fn build(b: *std.Build) void {
     ui_main_module.addImport("ui_state", ui_state_module);
     ui_main_module.addImport("sprites", ui_sprites_module);
     ui_main_module.addImport("visualizer", ui_visualizer_module);
+    ui_state_module.addImport("ipc", ipc_module);
+    ui_state_module.addImport("messages", ipc_messages_module);
+    ui_visualizer_module.addImport("messages", ipc_messages_module);
+    ui_visualizer_module.addImport("common", common_module);
+    
     ui_main_module.addIncludePath(sdl_dep.path("include"));
+    ui_visualizer_module.addIncludePath(sdl_dep.path("include"));
     
     // UI module dependencies
     ui_main_module.linkLibrary(sdl_lib);

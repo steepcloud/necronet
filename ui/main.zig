@@ -178,7 +178,7 @@ pub const UIContext = struct {
 // Initialize SDL and create window with error handling
 fn initSDL(allocator: std.mem.Allocator) !UIContext {
     // Initialize SDL with proper error handling
-    if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_TIMER | sdl.SDL_INIT_AUDIO) < 0) {
+    if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_AUDIO)) {
         const err_msg = sdl.SDL_GetError();
         std.log.err("Failed to initialize SDL: {s}", .{err_msg});
         return UIError.InitializationFailed;
@@ -193,7 +193,7 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
         WINDOW_TITLE,
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
-        sdl.SDL_WINDOW_SHOWN | sdl.SDL_WINDOW_RESIZABLE
+        0 | sdl.SDL_WINDOW_RESIZABLE
     ) orelse {
         const err_msg = sdl.SDL_GetError();
         std.log.err("Failed to create window: {s}", .{err_msg});
@@ -202,19 +202,20 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
     errdefer sdl.SDL_DestroyWindow(window);
 
     // Create renderer
-    const renderer_flags = sdl.SDL_RENDERER_ACCELERATED | sdl.SDL_RENDERER_PRESENTVSYNC;
-    const renderer_context = sdl.SDL_CreateRenderer(window, null, renderer_flags) orelse {
+    //const renderer_flags = @as(u32, 1);
+    const renderer_context = sdl.SDL_CreateRenderer(window, null) orelse {
         const err_msg = sdl.SDL_GetError();
         std.log.err("Failed to create renderer: {s}", .{err_msg});
         return UIError.InitializationFailed;
     };
     errdefer sdl.SDL_DestroyRenderer(renderer_context);
 
+    _ = sdl.SDL_SetRenderVSync(renderer_context, 1);
     // Set blend mode for transparency
     _ = sdl.SDL_SetRenderDrawBlendMode(renderer_context, sdl.SDL_BLENDMODE_BLEND);
 
     // Create visualizer
-    const viz = visualizer.create(allocator, renderer_context) catch {
+    const viz = visualizer.Visualizer.create(allocator, @ptrCast(renderer_context)) catch {
         std.log.err("Failed to initialize visualizer", .{});
         return UIError.AssetLoadingFailed;
     };
@@ -342,18 +343,18 @@ fn processMessages(ctx: *UIContext) !void {
 // Handle SDL events with improved flow
 fn handleEvents(ctx: *UIContext) void {
     var event: sdl.SDL_Event = undefined;
-    while (sdl.SDL_PollEvent(&event) != 0) {
+    while (sdl.SDL_PollEvent(&event)) {
         switch (event.type) {
             sdl.SDL_EVENT_QUIT => {
                 ctx.running = false;
             },
             sdl.SDL_EVENT_KEY_DOWN => {
-                handleKeyPress(ctx, event.key.keysym.sym);
+                handleKeyPress(ctx, @intCast(event.key.key));
             },
             sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => {
                 ctx.visualizer.handleMouseClick(
-                    event.button.x, 
-                    event.button.y, 
+                    @intFromFloat(event.button.x), 
+                    @intFromFloat(event.button.y), 
                     event.button.button == sdl.SDL_BUTTON_LEFT
                 );
             },
@@ -364,17 +365,29 @@ fn handleEvents(ctx: *UIContext) void {
         }
         
         // Let the visualizer handle events too
-        ctx.visualizer.handleEvent(&event);
+        switch (event.type) {
+            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => {
+                ctx.visualizer.handleMouseClick(
+                    @intFromFloat(event.button.x),
+                    @intFromFloat(event.button.y),
+                    event.button.button == sdl.SDL_BUTTON_LEFT
+                );
+            },
+            sdl.SDL_EVENT_WINDOW_RESIZED => {
+                ctx.visualizer.handleResize(event.window.data1, event.window.data2);
+            },
+            else => {}, // Ignore other events
+        }
     }
 }
 
 // Handle keyboard input separately for clarity
 fn handleKeyPress(ctx: *UIContext, key: i32) void {
     switch (key) {
-        sdl.SDL_KEYCODE_ESCAPE => {
+        sdl.SDLK_ESCAPE => {
             ctx.running = false;
         },
-        sdl.SDL_KEYCODE_F => {
+        sdl.SDLK_F => {
             // Toggle fullscreen
             const flags = sdl.SDL_GetWindowFlags(ctx.window);
             if (flags & sdl.SDL_WINDOW_FULLSCREEN != 0) {
@@ -383,18 +396,18 @@ fn handleKeyPress(ctx: *UIContext, key: i32) void {
                 _ = sdl.SDL_SetWindowFullscreen(ctx.window, true);
             }
         },
-        sdl.SDL_KEYCODE_V => {
+        sdl.SDLK_V => {
             // Cycle through view modes
             ctx.state.cycleViewMode();
         },
-        sdl.SDL_KEYCODE_C => {
+        sdl.SDLK_C => {
             // Clear all alerts
             ctx.alerts.clearRetainingCapacity();
             ctx.visualizer.clearAlerts();
         },
-        sdl.SDL_KEYCODE_1, sdl.SDL_KEYCODE_2, sdl.SDL_KEYCODE_3 => {
+        sdl.SDLK_1, sdl.SDLK_2, sdl.SDLK_3 => {
             // Switch visualization modes
-            const mode = key - sdl.SDL_KEYCODE_1; // 0, 1, or 2
+            const mode = key - sdl.SDLK_1; // 0, 1, or 2
             ctx.visualizer.setVisualizationMode(@intCast(mode));
         },
         else => {},
@@ -406,7 +419,7 @@ fn renderUIOverlay(ctx: *UIContext, _: f32) !void {
     // Get window size for layout calculations
     var width: i32 = 0;
     var height: i32 = 0;
-    sdl.SDL_GetWindowSize(ctx.window, &width, &height);
+    _ = sdl.SDL_GetWindowSize(ctx.window, &width, &height);
     
     // Render status panel with connection status, FPS, etc.
     try renderStatusPanel(ctx, 10, 10, 200, 80);
@@ -422,7 +435,7 @@ fn renderUIOverlay(ctx: *UIContext, _: f32) !void {
         try renderNotification(
             ctx, 
             notification.message, 
-            @intCast(width / 2 - 150), 
+            @intCast(@divTrunc(width, 2) - 150), 
             height - 60, 
             300, 
             50, 
@@ -441,7 +454,7 @@ fn renderStatusPanel(ctx: *UIContext, x: i32, y: i32, width: i32, height: i32) !
         .h = @floatFromInt(height),
     };
     
-    sdl.SDL_SetRenderDrawColor(
+    _ = sdl.SDL_SetRenderDrawColor(
         ctx.renderer, 
         THEME.COLORS.PANEL[0], 
         THEME.COLORS.PANEL[1], 
@@ -468,7 +481,7 @@ fn renderStatusPanel(ctx: *UIContext, x: i32, y: i32, width: i32, height: i32) !
         .h = 10,
     };
     
-    sdl.SDL_SetRenderDrawColor(
+    _ = sdl.SDL_SetRenderDrawColor(
         ctx.renderer, 
         status_color[0], 
         status_color[1], 
@@ -495,7 +508,7 @@ fn renderNotification(
         .h = @floatFromInt(height),
     };
     
-    sdl.SDL_SetRenderDrawColor(ctx.renderer, color[0], color[1], color[2], 180);
+    _ = sdl.SDL_SetRenderDrawColor(ctx.renderer, color[0], color[1], color[2], 180);
     _ = sdl.SDL_RenderFillRect(ctx.renderer, &notification_rect);
     
     // In a real implementation, render text here with SDL_ttf
@@ -553,14 +566,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
         };
         
         // Render frame
-        sdl.SDL_SetRenderDrawColor(
+        _ = sdl.SDL_SetRenderDrawColor(
             ctx.renderer, 
             THEME.COLORS.BACKGROUND[0], 
             THEME.COLORS.BACKGROUND[1], 
             THEME.COLORS.BACKGROUND[2], 
             THEME.COLORS.BACKGROUND[3]
         );
-        sdl.SDL_RenderClear(ctx.renderer);
+        _ = sdl.SDL_RenderClear(ctx.renderer);
         
         // Render visualization
         ctx.visualizer.render() catch |err| {
@@ -573,7 +586,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         };
         
         // Present final frame
-        sdl.SDL_RenderPresent(ctx.renderer);
+        _ = sdl.SDL_RenderPresent(ctx.renderer);
         
         // Update FPS counter
         ctx.fps_counter.update(current_time);
@@ -581,7 +594,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         // Cap framerate
         const frame_time = sdl.SDL_GetTicks() - frame_start;
         if (frame_time < FRAME_TIME_MS) {
-            sdl.SDL_Delay(FRAME_TIME_MS - frame_time);
+            sdl.SDL_Delay(@intCast(FRAME_TIME_MS - frame_time));
         }
     }
 }
