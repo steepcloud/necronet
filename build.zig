@@ -81,6 +81,7 @@ pub fn build(b: *std.Build) void {
     
     ui_main_module.addIncludePath(sdl_dep.path("include"));
     ui_visualizer_module.addIncludePath(sdl_dep.path("include"));
+    ui_renderer_module.addIncludePath(sdl_dep.path("include"));
     
     // UI module dependencies
     ui_main_module.linkLibrary(sdl_lib);

@@ -4,6 +4,7 @@ const sdl = @cImport({
 });
 const msg = @import("messages");
 const common = @import("common");
+const rend = @import("renderer");
 
 // Visual representation of a network flow
 pub const NetworkFlow = struct {
@@ -61,7 +62,7 @@ pub const SligAlert = struct {
 
 pub const Visualizer = struct {
     allocator: std.mem.Allocator,
-    renderer: *sdl.SDL_Renderer,
+    renderer: rend.Renderer,
     flows: std.AutoHashMap(u64, NetworkFlow),
     alerts: std.ArrayList(SligAlert),
     
@@ -86,11 +87,11 @@ pub const Visualizer = struct {
     };
     
     // Create a new visualizer
-    pub fn create(allocator: std.mem.Allocator, renderer: *sdl.SDL_Renderer) !*Visualizer {
+    pub fn create(allocator: std.mem.Allocator, sdl_renderer: *sdl.SDL_Renderer) !*Visualizer {
         var viz = try allocator.create(Visualizer);
         viz.* = Visualizer{
             .allocator = allocator,
-            .renderer = renderer,
+            .renderer = try rend.Renderer.init(allocator, sdl_renderer),
             .flows = std.AutoHashMap(u64, NetworkFlow).init(allocator),
             .alerts = std.ArrayList(SligAlert).init(allocator),
             .pipe_texture = null,
@@ -131,20 +132,11 @@ pub const Visualizer = struct {
     }
     
     // Helper to load a texture
-    fn loadTexture(renderer: *sdl.SDL_Renderer, path: [*:0]const u8) !*sdl.SDL_Texture {
-        // Using SDL_image for PNG support
-        const surface = sdl.SDL_LoadBMP(path) orelse {
-            std.log.err("Failed to load image {s}: {s}", .{path, sdl.SDL_GetError()});
+    fn loadTexture(renderer: rend.Renderer, path: [*:0]const u8) !*sdl.SDL_Texture {
+        return renderer.loadTexture(path) catch |err| {
+            std.log.err("Failed to load texture {s}: {}", .{path, err});
             return error.ImageLoadFailed;
         };
-        defer sdl.SDL_DestroySurface(surface);
-        
-        const texture = sdl.SDL_CreateTextureFromSurface(renderer, surface) orelse {
-            std.log.err("Failed to create texture from {s}: {s}", .{path, sdl.SDL_GetError()});
-            return error.TextureCreateFailed;
-        };
-        
-        return texture;
     }
     
     // Add a new packet to visualize
@@ -299,12 +291,22 @@ pub const Visualizer = struct {
         var flow_it = self.flows.valueIterator();
         while (flow_it.next()) |flow| {
             try self.renderFlow(flow);
+
+            // render packets in this flow
+            for (flow.packets.items) |*packet| {
+                try self.renderPacket(flow, packet);
+            }
         }
         
         // Render alerts (Sligs)
         for (self.alerts.items) |alert| {
             try self.renderAlert(&alert);
         }
+
+        // optional: drawing debug info
+        //if (self.visualization_mode == 1) {
+        //    try self.drawDebugInfo();
+        //}
     }
     
     // Handle SDL events
@@ -352,7 +354,7 @@ pub const Visualizer = struct {
     
     // Helper to render a flow
     fn renderFlow(self: *Visualizer, flow: *const NetworkFlow) !void {
-        const dest_rect = sdl.SDL_FRect{
+        const rect = rend.Rect{
             .x = flow.x,
             .y = flow.y,
             .w = flow.width,
@@ -370,24 +372,22 @@ pub const Visualizer = struct {
 
                     
             // Set pipe color based on flow state
-            _ = sdl.SDL_SetTextureColorMod(
-                self.pipe_texture.?, 
-                flow.color[0], 
-                flow.color[1], 
-                flow.color[2]
-            );
+            const color = rend.Color{
+                .r = flow.color[0],
+                .g = flow.color[1],
+                .b = flow.color[2],
+                .a = flow.color[3],
+            };
             
-            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
+            try self.renderer.drawColoredTexture(texture, src_rect, rect.toSDLRect(), color);
         } else {
             // fallback: just draw a colored rectangle
-            _ = sdl.SDL_SetRenderDrawColor(
-                self.renderer,
-                flow.color[0],
-                flow.color[1],
-                flow.color[2],
-                255
-            );
-            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
+            try self.renderer.fillRect(rect, rend.Color{
+                .r = flow.color[0],
+                .g = flow.color[1],
+                .b = flow.color[2],
+                .a = flow.color[3],
+            });
         }
     }
     
@@ -396,7 +396,7 @@ pub const Visualizer = struct {
         const x = flow.x + flow.width * packet.position - size / 2.0;
         const y = flow.y + flow.height / 2.0 - size / 2.0;
         
-        const dest_rect = sdl.SDL_FRect{
+        const packet_rect = rend.Rect{
             .x = x,
             .y = y,
             .w = size,
@@ -414,30 +414,41 @@ pub const Visualizer = struct {
                 .h = 32.0,
             };
             
-            _ = sdl.SDL_SetTextureColorMod(
-                texture, 
-                packet.color[0], 
-                packet.color[1], 
-                packet.color[2]
-            );
+            const color = rend.Color{
+                .r = packet.color[0],
+                .g = packet.color[1],
+                .b = packet.color[2],
+                .a = 255,
+            };
             
-            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
+            try self.renderer.drawColoredTexture(texture, src_rect, packet_rect.toSDLRect(), color);
         } else {
             // Fallback: draw a circle or rectangle
-            sdl.SDL_SetRenderDrawColor(
-                self.renderer, 
-                packet.color[0], 
-                packet.color[1], 
-                packet.color[2], 
-                255
-            );
-            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
+            const color = rend.Color{
+                .r = packet.color[0],
+                .g = packet.color[1],
+                .b = packet.color[2],
+                .a = 255,
+            };
+
+            // using either a circle or rectangle
+            if (packet.is_malicious) {
+                // using a circle for malicious packets to make them stand out
+                try self.renderer.fillCircle(
+                    x + size / 2.0,
+                    y + size / 2.0,
+                    size / 2.0,
+                    color
+                );
+            } else {
+                try self.renderer.fillRect(packet_rect, color);
+            }
         }
     }
 
     fn renderAlert(self: *Visualizer, alert: *const SligAlert) !void {
         const size = 64.0 * alert.scale;
-        const dest_rect = sdl.SDL_FRect{
+        const alert_rect = rend.Rect{
             .x = alert.x,
             .y = alert.y,
             .w = size,
@@ -455,23 +466,28 @@ pub const Visualizer = struct {
                 .h = 64.0,
             };
             
-            _ = sdl.SDL_RenderTexture(self.renderer, texture, &src_rect, &dest_rect);
+            try self.renderer.drawTexture(texture, src_rect, alert_rect.toSDLRect());
         } else {
             // Fallback: draw a distinctive shape for alerts
             const severity_color = switch (alert.severity) {
-                0 => [4]u8{ 100, 200, 100, 255 }, // Green for low
-                1 => [4]u8{ 255, 200, 0, 255 },   // Yellow for medium
-                else => [4]u8{ 255, 0, 0, 255 },  // Red for high
+                0 => rend.Color{ .r = 100, .g = 200, .b = 100, .a = 255 }, // Green for low
+                1 => rend.Color{ .r = 255, .g = 200, .b = 0, .a = 255 },   // Yellow for medium
+                else => rend.Color{ .r = 255, .g = 0, .b = 0, .a = 255 },  // Red for high
             };
-            
-            _ = sdl.SDL_SetRenderDrawColor(
-                self.renderer, 
-                severity_color[0],
-                severity_color[1],
-                severity_color[2],
-                255
-            );
-            _ = sdl.SDL_RenderFillRect(self.renderer, &dest_rect);
+
+            // diamond shape for alerts
+            if (alert.severity > 1) {
+                // for severe alerts, filled circle
+                try self.renderer.fillCircle(
+                    alert.x + size / 2.0,
+                    alert.y + size / 2.0,
+                    size / 2.0,
+                    severity_color
+                );
+            } else {
+                // for less severe alerts, rounded rectangle
+                try self.renderer.fillRoundedRect(alert_rect, 8.0, severity_color);
+            }
         }
     }
     
