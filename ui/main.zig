@@ -65,6 +65,7 @@ pub const UIContext = struct {
     ipc_channel: *ipc.IPCChannel,
     window: *sdl.SDL_Window,
     renderer: *sdl.SDL_Renderer,
+    ui_renderer: renderer.Renderer,
     visualizer: *visualizer.Visualizer,
     state: ui_state.UIState,
     flows: std.AutoHashMap(u64, visualizer.NetworkFlow),
@@ -202,13 +203,15 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
     errdefer sdl.SDL_DestroyWindow(window);
 
     // Create renderer
-    //const renderer_flags = @as(u32, 1);
     const renderer_context = sdl.SDL_CreateRenderer(window, null) orelse {
         const err_msg = sdl.SDL_GetError();
         std.log.err("Failed to create renderer: {s}", .{err_msg});
         return UIError.InitializationFailed;
     };
     errdefer sdl.SDL_DestroyRenderer(renderer_context);
+
+    // custom renderer
+    const ui_renderer= try renderer.Renderer.init(allocator, renderer_context);
 
     _ = sdl.SDL_SetRenderVSync(renderer_context, 1);
     // Set blend mode for transparency
@@ -236,6 +239,7 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
         .ipc_channel = channel,
         .window = window,
         .renderer = renderer_context,
+        .ui_renderer = ui_renderer,
         .visualizer = viz,
         .state = state,
         .flows = std.AutoHashMap(u64, visualizer.NetworkFlow).init(allocator),
@@ -448,48 +452,34 @@ fn renderUIOverlay(ctx: *UIContext, _: f32) !void {
 // Render a status panel with current stats
 fn renderStatusPanel(ctx: *UIContext, x: i32, y: i32, width: i32, height: i32) !void {
     // Draw panel background
-    const panel_rect = sdl.SDL_FRect{
-        .x = @floatFromInt(x),
-        .y = @floatFromInt(y),
-        .w = @floatFromInt(width),
-        .h = @floatFromInt(height),
+    const panel_rect = renderer.Rect{
+        .x = @as(f32, @floatFromInt(x)),
+        .y = @as(f32, @floatFromInt(y)),
+        .w = @as(f32, @floatFromInt(width)),
+        .h = @as(f32, @floatFromInt(height)),
     };
     
-    _ = sdl.SDL_SetRenderDrawColor(
-        ctx.renderer, 
-        THEME.COLORS.PANEL[0], 
-        THEME.COLORS.PANEL[1], 
-        THEME.COLORS.PANEL[2], 
-        THEME.COLORS.PANEL[3]
-    );
-    _ = sdl.SDL_RenderFillRect(ctx.renderer, &panel_rect);
-    
-    // Draw status information
-    // Note: In a real implementation you'd use proper text rendering with SDL_ttf
-    // But for now we'll just say it's placeholder
-    
-    // Draw connection status indicator
-    const status_color = switch (ctx.connection_status) {
-        .Connected => [4]u8{ 50, 200, 50, 255 },     // Green
-        .Disconnected => [4]u8{ 200, 50, 50, 255 },  // Red
-        .Reconnecting => [4]u8{ 200, 200, 50, 255 }, // Yellow
+    try ctx.ui_renderer.fillRect(panel_rect, renderer.Color{
+        .r = THEME.COLORS.PANEL[0],
+        .g = THEME.COLORS.PANEL[1],
+        .b = THEME.COLORS.PANEL[2],
+        .a = THEME.COLORS.PANEL[3],
+    });
+
+    const status_color = switch(ctx.connection_status) {
+        .Connected => renderer.Color{ .r = 50, .g = 200, .b = 50, .a = 255 },     // Green
+        .Disconnected => renderer.Color{ .r = 200, .g = 50, .b = 50, .a = 255 },  // Red
+        .Reconnecting => renderer.Color{ .r = 200, .g = 200, .b = 50, .a = 255 }, // Yellow
     };
     
-    const indicator_rect = sdl.SDL_FRect{
-        .x = @floatFromInt(x + 10),
-        .y = @floatFromInt(y + 10),
+    const indicator_rect = renderer.Rect{
+        .x = @as(f32, @floatFromInt(x + 10)),
+        .y = @as(f32, @floatFromInt(y + 10)),
         .w = 10,
         .h = 10,
     };
-    
-    _ = sdl.SDL_SetRenderDrawColor(
-        ctx.renderer, 
-        status_color[0], 
-        status_color[1], 
-        status_color[2], 
-        status_color[3]
-    );
-    _ = sdl.SDL_RenderFillRect(ctx.renderer, &indicator_rect);
+
+    try ctx.ui_renderer.fillRect(indicator_rect, status_color);
 }
 
 // Render a notification message
@@ -502,17 +492,21 @@ fn renderNotification(
     height: i32,
     color: [4]u8
 ) !void {
-    const notification_rect = sdl.SDL_FRect{
-        .x = @floatFromInt(x),
-        .y = @floatFromInt(y),
-        .w = @floatFromInt(width),
-        .h = @floatFromInt(height),
+    const notification_rect = renderer.Rect{
+        .x = @as(f32, @floatFromInt(x)),
+        .y = @as(f32, @floatFromInt(y)),
+        .w = @as(f32, @floatFromInt(width)),
+        .h = @as(f32, @floatFromInt(height)),
     };
     
-    _ = sdl.SDL_SetRenderDrawColor(ctx.renderer, color[0], color[1], color[2], 180);
-    _ = sdl.SDL_RenderFillRect(ctx.renderer, &notification_rect);
-    
-    // In a real implementation, render text here with SDL_ttf
+    try ctx.ui_renderer.fillRect(notification_rect, renderer.Color{
+        .r = color[0],
+        .g = color[1],
+        .b = color[2],
+        .a = 180,
+    });
+
+    // future todo: render text here with SDL_ttf
     _ = message;
 }
 
@@ -576,14 +570,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
         std.debug.print("After ctx.visualizer.update\n", .{});
         
         // Render frame
-        _ = sdl.SDL_SetRenderDrawColor(
-            ctx.renderer, 
-            THEME.COLORS.BACKGROUND[0], 
-            THEME.COLORS.BACKGROUND[1], 
-            THEME.COLORS.BACKGROUND[2], 
-            THEME.COLORS.BACKGROUND[3]
-        );
-        _ = sdl.SDL_RenderClear(ctx.renderer);
+        try ctx.ui_renderer.setBackgroundColor(renderer.Color{
+            .r = THEME.COLORS.BACKGROUND[0],
+            .g = THEME.COLORS.BACKGROUND[1],
+            .b = THEME.COLORS.BACKGROUND[2],
+            .a = THEME.COLORS.BACKGROUND[3],
+        });
+        try ctx.ui_renderer.clear();
         
         // Render visualization
         std.debug.print("Before ctx.visualizer.render\n", .{});
@@ -600,7 +593,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         std.debug.print("After renderUIOverlay\n", .{});
         
         // Present final frame
-        _ = sdl.SDL_RenderPresent(ctx.renderer);
+        ctx.ui_renderer.present();
         
         // Update FPS counter
         ctx.fps_counter.update(current_time);
