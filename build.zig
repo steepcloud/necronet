@@ -160,6 +160,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("parser", parser_module);
     unit_tests.root_module.addImport("ipc", ipc_module);
     unit_tests.root_module.addImport("common", common_module);
+    unit_tests.root_module.addImport("messages", ipc_messages_module);
 
     if (target.result.os.tag == .windows) {
         unit_tests.addIncludePath(b.path("."));
