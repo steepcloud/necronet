@@ -126,7 +126,7 @@ pub const SligAlert = struct {
             .source_port = alert.source_port,
             .dest_port = alert.dest_port,
             .flow_id = alert.connection_id,
-            .confidence = alert.confidence,
+            .confidence = 1.0,
             .evidence = null,
         };
 
@@ -206,6 +206,26 @@ pub const ShutdownPayload = struct {
     restart: bool = false,
 };
 
+pub const ConfigUpdatePayload = struct {
+    config_path: ?[]const u8 = null,
+    config_json: ?[]const u8 = null,
+};
+
+pub const CaptureControlPayload = struct {
+    command: enum(u8) {
+        Start,
+        Stop,
+        Pause,
+        Resume,
+    },
+    device_name: ?[]const u8 = null,
+};
+
+pub const FilterUpdatePayload = struct {
+    filter_expression: []const u8,
+    apply_immediately: bool = true,
+};
+
 /// Top-level wrapper for all IPC messages
 pub const Message = struct {
     header: MessageHeader,
@@ -221,23 +241,9 @@ pub const Message = struct {
         FlowUpdate: FlowUpdate,
         SligAlert: SligAlert,
         DetectionStats: DetectionStats,
-        ConfigUpdate: struct {
-            config_path: ?[]const u8 = null,
-            config_json: ?[]const u8 = null,
-        },
-        CaptureControl: struct {
-            command: enum(u8) {
-                Start,
-                Stop,
-                Pause,
-                Resume,
-            },
-            device_name: ?[]const u8 = null,
-        },
-        FilterUpdate: struct {
-            filter_expression: []const u8,
-            apply_immediately: bool = true,
-        },
+        ConfigUpdate: ConfigUpdatePayload,
+        CaptureControl: CaptureControlPayload,
+        FilterUpdate: FilterUpdatePayload,
     };
 
     /// Free memory associated with this message
@@ -276,7 +282,18 @@ pub fn createPacketEventMsg(sequence: u64, event: PacketEvent) Message {
 }
 
 /// Create a Slig Alert message
-pub fn createSligAlertMsg(sequence: u64, alert: SligAlert) Message {
+pub fn createSligAlertMsg(sequence: u64, alert: SligAlert, allocator: std.mem.Allocator) !Message {
+    const category_copy = try allocator.dupe(u8, alert.category);
+    errdefer allocator.free(category_copy);
+
+    const message_copy = try allocator.dupe(u8, alert.message);
+    errdefer allocator.free(message_copy);
+
+    var evidence_copy: ?[]u8 = null;
+    if (alert.evidence) |evidence| {
+        evidence_copy = try allocator.dupe(u8, evidence);
+    }
+
     return Message{
         .header = MessageHeader{
             .sequence = sequence,
@@ -285,12 +302,10 @@ pub fn createSligAlertMsg(sequence: u64, alert: SligAlert) Message {
             .payload_size = blk: {
                 var size: u64 = @sizeOf(SligAlert);
 
-                if (alert.evidence) |e| {
-                    size += e.len;
-                }
+                size += category_copy.len;
+                size += message_copy.len;
 
-                size += alert.category.len;
-                size += alert.message.len;
+                if (evidence_copy) |e| size += e.len;
 
                 if (size > std.math.maxInt(u32)) {
                     @panic("Message payload size exceeds u32 max");
@@ -299,7 +314,23 @@ pub fn createSligAlertMsg(sequence: u64, alert: SligAlert) Message {
                 break :blk @intCast(size);
             },
         },
-        .payload = .{ .SligAlert = alert },
+        .payload = .{ 
+            .SligAlert = .{
+                .alert_id = alert.alert_id,
+                .flow_id = alert.flow_id,
+                .timestamp = alert.timestamp,
+                .severity = alert.severity,
+                .category = category_copy,
+                .message = message_copy,
+                .protocol = alert.protocol,
+                .source_ip = alert.source_ip,
+                .dest_ip = alert.dest_ip,
+                .source_port = alert.source_port,
+                .dest_port = alert.dest_port,
+                .confidence = alert.confidence,
+                .evidence = evidence_copy,
+                }
+        },
     };
 }
 
@@ -323,8 +354,13 @@ pub fn createErrorMsg(sequence: u64, err: ErrorInfo) Message {
             .sequence = sequence,
             .timestamp = std.time.microTimestamp(),
             .msg_type = .Error,
-            .payload_size = @sizeOf(ErrorInfo) +
-                err.component.len + err.message.len,
+            .payload_size = blk: {
+                const size = @sizeOf(ErrorInfo) + err.component.len + err.message.len;
+                if (size > std.math.maxInt(u32)) {
+                    @panic("Message payload size exceeds u32 max");
+                }
+                break :blk @intCast(size);
+            },
         },
         .payload = .{ .Error = err },
     };
@@ -364,7 +400,7 @@ pub fn packetEventFromCaptureInfo(packet: *const capture.PacketInfo, flow_id: u6
                 // Verify IP header length is valid and we have enough data
                 if (ihl >= 5 and payload.len >= ip_header_len) {
                     // Extract fragmentation info from IP header
-                    const frag_info = std.mem.readIntBig(u16, payload[6..8]);
+                    const frag_info = std.mem.readInt(u16, payload[6..8], .big);
                     flags.fragmented = (frag_info & 0x1FFF) != 0; // Check offset or MF flag
 
                     // Calculate TCP header offset and verify we have enough data
@@ -474,17 +510,17 @@ pub fn validate(self: *const Message) ?ErrorInfo {
 
     // Validate payload size based on message type
     const min_size: u32 = switch (self.header.msg_type) {
-        .Hello => @sizeOf(Message.Payload.Hello),
-        .Heartbeat => @sizeOf(Message.Payload.Heartbeat),
-        .Shutdown => @sizeOf(Message.Payload.Shutdown),
+        .Hello => @sizeOf(HelloPayload),
+        .Heartbeat => @sizeOf(HeartbeatPayload),
+        .Shutdown => @sizeOf(ShutdownPayload),
         .Error => @sizeOf(ErrorInfo),
         .PacketEvent => @sizeOf(PacketEvent),
         .FlowUpdate => @sizeOf(FlowUpdate),
         .SligAlert => @sizeOf(SligAlert),
         .DetectionStats => @sizeOf(DetectionStats),
-        .ConfigUpdate => @sizeOf(Message.Payload.ConfigUpdate),
-        .CaptureControl => @sizeOf(Message.Payload.CaptureControl),
-        .FilterUpdate => @sizeOf(Message.Payload.FilterUpdate),
+        .ConfigUpdate => @sizeOf(ConfigUpdatePayload),
+        .CaptureControl => @sizeOf(CaptureControlPayload),
+        .FilterUpdate => @sizeOf(FilterUpdatePayload),
     };
 
     if (self.header.payload_size < min_size) {
@@ -670,7 +706,7 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
             // Write string length and content
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.client_name.len), .big);
             offset += 4;
-            @memcpy(buffer[offset..], p.client_name);
+            @memcpy(buffer[offset..][0..p.client_name.len], p.client_name);
         },
         .SligAlert => |p| {
             var offset: usize = @sizeOf(MessageHeader);
@@ -687,13 +723,13 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
             // Write category
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.category.len), .big);
             offset += 4;
-            @memcpy(buffer[offset..], p.category);
+            @memcpy(buffer[offset..][0..p.category.len], p.category);
             offset += p.category.len;
 
             // Write message
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.message.len), .big);
             offset += 4;
-            @memcpy(buffer[offset..], p.message);
+            @memcpy(buffer[offset..][0..p.message.len], p.message);
             offset += p.message.len;
 
             // Write evidence if present
@@ -702,10 +738,29 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
                 offset += 1;
                 std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(evidence.len), .big);
                 offset += 4;
-                @memcpy(buffer[offset..], evidence);
+                @memcpy(buffer[offset..][0..evidence.len], evidence);
             } else {
                 buffer[offset] = 0; // no evidence
             }
+        },
+        .Heartbeat => |p| {
+            const offset: usize = @sizeOf(MessageHeader);
+            @memcpy(buffer[offset..][0..@sizeOf(u64)], std.mem.asBytes(&p.uptime_seconds));
+        },
+        .Shutdown => |p| {
+            var offset: usize = @sizeOf(MessageHeader);
+            @memcpy(buffer[offset..][0..@sizeOf(bool)], std.mem.asBytes(&p.restart));
+            offset += @sizeOf(bool);
+
+            @memcpy(buffer[offset..][0..p.reason.len], p.reason);
+
+            return buffer;
+        },
+        .PacketEvent => |p| {
+            const offset = @sizeOf(MessageHeader);
+            @memcpy(buffer[offset..][0..@sizeOf(PacketEvent)], std.mem.asBytes(&p));
+
+            return buffer;
         },
         else => {
             // For other message types, implement binary serialization here
