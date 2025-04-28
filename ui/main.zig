@@ -218,10 +218,10 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
     _ = sdl.SDL_SetRenderDrawBlendMode(renderer_context, sdl.SDL_BLENDMODE_BLEND);
 
     // Create visualizer
-    const viz = visualizer.Visualizer.create(allocator, @ptrCast(renderer_context)) catch {
-        std.log.err("Failed to initialize visualizer", .{});
-        return UIError.AssetLoadingFailed;
-    };
+    const viz = try visualizer.Visualizer.createWithRenderer(
+        allocator, 
+        @constCast(&ui_renderer)
+    );
     errdefer viz.destroy();
 
     // Create IPC channel for communicating with backend
@@ -253,13 +253,17 @@ fn initSDL(allocator: std.mem.Allocator) !UIContext {
 
 // Process IPC messages with improved error handling
 fn processMessages(ctx: *UIContext) !void {
+    std.log.debug("Processing messages...", .{});
+
     // If disconnected, try to reconnect
     if (ctx.connection_status != .Connected) {
+        std.debug.print("Not connected, attempting to reconnect...", .{});
         ctx.connection_status = .Reconnecting;
         const reconnected = try ctx.attemptReconnect();
         
         if (!reconnected) {
             // Skip message processing this frame
+            std.debug.print("Reconnection failed", .{});
             return;
         }
         
@@ -270,23 +274,32 @@ fn processMessages(ctx: *UIContext) !void {
     var message_count: u32 = 0;
     const MAX_MESSAGES_PER_FRAME = 100; // Prevent processing too many in a single frame
     
+    var got_any_message = false;
+
     while (message_count < MAX_MESSAGES_PER_FRAME) {
-        std.debug.print("Before receiveMessage in processMessage\n", .{});
+        //std.debug.print("Before receiveMessage in processMessage\n", .{});
         const message = ctx.ipc_channel.receiveMessage() catch |err| {
             switch (err) {
                 ipc.IPCError.Disconnected => {
+                    std.debug.print("IPC disconnected durin message processing", .{});
                     ctx.connection_status = .Disconnected;
                     return;
                 },
                 ipc.IPCError.ReceiveFailed => {
-                    std.log.warn("Failed to receive message, will retry", .{});
+                    std.debug.print("Failed to receive message, will retry", .{});
                     return;
                 },
-                else => return err,
+                else => {
+                    std.debug.print("Unexpected IPC error: {}", .{err});
+                    return err;
+                },
             }
         } orelse break; // No more messages to process
-        std.debug.print("After receiveMessage in processMessage\n", .{});
+        //std.debug.print("After receiveMessage in processMessage\n", .{});
+        got_any_message = true;
         message_count += 1;
+
+        std.debug.print("Received message: {}", .{message.header.msg_type});
 
         switch (message.header.msg_type) {
             .PacketEvent => {
@@ -296,6 +309,11 @@ fn processMessages(ctx: *UIContext) !void {
             .FlowUpdate => {
                 const flow = message.payload.FlowUpdate;
                 try ctx.visualizer.updateFlow(flow);
+
+                std.debug.print("Flow update: id={}, protocol={s}", .{
+                    flow.flow_id,
+                    @tagName(flow.protocol)
+                });
                 
                 // If this flow has a serious state change, notify
                 if (flow.state == .Contaminated or flow.state == .Suspicious) {
@@ -340,7 +358,18 @@ fn processMessages(ctx: *UIContext) !void {
                 const stats = message.payload.DetectionStats;
                 ctx.state.setDetectionStats(stats);
             },
-            else => {}, // Ignore other message types for now
+            else => {
+                std.debug.print("Ignoring message type: {}", .{message.header.msg_type});
+            }, // Ignore other message types for now
+        }
+    }
+
+    if (message_count > 0) {
+        std.debug.print("Process {} messages this frame", .{message_count});
+    } else if (!got_any_message) {
+        const frame_count = sdl.SDL_GetTicks() / FRAME_TIME_MS;
+        if (frame_count % 30 == 0) {
+            std.debug.print("No messages received this frame", .{});
         }
     }
 }
@@ -510,6 +539,72 @@ fn renderNotification(
     _ = message;
 }
 
+pub fn testRendering(_: std.mem.Allocator) !void {
+    // Initialize SDL
+    if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) {
+        return error.SDLInitFailed;
+    }
+    defer sdl.SDL_Quit();
+    
+    // Create minimal window
+    const window = sdl.SDL_CreateWindow("Test Rendering", 800, 600, 0) orelse {
+        return error.WindowCreateFailed;
+    };
+    defer sdl.SDL_DestroyWindow(window);
+    
+    // Create renderer
+    const test_renderer = sdl.SDL_CreateRenderer(window, null) orelse {
+        return error.RendererCreateFailed;
+    };
+    defer sdl.SDL_DestroyRenderer(test_renderer);
+    
+    // Clear to red - check for errors
+    if (!sdl.SDL_SetRenderDrawColor(test_renderer, 255, 0, 0, 255)) {
+        std.debug.print("Failed to set color: {s}\n", .{sdl.SDL_GetError()});
+        return error.RenderingFailed;
+    }
+    
+    if (!sdl.SDL_RenderClear(test_renderer)) {
+        std.debug.print("Failed to clear: {s}\n", .{sdl.SDL_GetError()});
+        return error.RenderingFailed;
+    }
+    
+    _ = sdl.SDL_RenderPresent(test_renderer);
+    
+    // Keep window open until closed
+    std.debug.print("\nTEST WINDOW SHOULD BE RED! Close window or press ESC to exit.\n", .{});
+    
+    // Add event loop
+    var running = true;
+    var event: sdl.SDL_Event = undefined;
+    
+    while (running) {
+        // Process events
+        while (sdl.SDL_PollEvent(&event)) {
+            switch (event.type) {
+                sdl.SDL_EVENT_QUIT => {
+                    running = false;
+                },
+                sdl.SDL_EVENT_KEY_DOWN => {
+                    if (event.key.key == sdl.SDLK_ESCAPE) {
+                        running = false;
+                    }
+                },
+                else => {},
+            }
+        }
+        
+        // Draw something to prove rendering works
+        if (!sdl.SDL_SetRenderDrawColor(test_renderer, 255, 255, 255, 255)) {
+            var rect = sdl.SDL_FRect{ .x = 100, .y = 100, .w = 200, .h = 150 };
+            _ = sdl.SDL_RenderFillRect(test_renderer, &rect);
+        }
+        
+        _ = sdl.SDL_RenderPresent(test_renderer);
+        _ = sdl.SDL_Delay(16); // ~60fps
+    }
+}
+
 // Main UI loop with improved structure and error handling
 pub fn run(allocator: std.mem.Allocator) !void {
     var ctx = try initSDL(allocator);
@@ -533,25 +628,18 @@ pub fn run(allocator: std.mem.Allocator) !void {
     // Main loop with proper frame timing
     while (ctx.running) {
         // Handle SDL events
-        std.debug.print("Before handleEvents\n", .{});
         handleEvents(&ctx);
-        std.debug.print("After handleEvents\n", .{});
 
         const frame_start = sdl.SDL_GetTicks();
         
         // Check IPC connection periodically
-        std.debug.print("Before checkConnectionStatus\n", .{});
         try ctx.checkConnectionStatus();
-        std.debug.print("After checkConnectionStatus\n", .{});
         
         // Process IPC messages from backend
-        std.debug.print("Before processMessages\n", .{});
         processMessages(&ctx) catch |err| {
             std.log.err("Error processing messages: {}", .{err});
             // Continue running despite errors
         };
-        std.debug.print("After processMessages\n", .{});
-        
         
         // Calculate delta time
         const current_time = sdl.SDL_GetTicks();
@@ -563,11 +651,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
         ctx.state.update(delta_sec);
         
         // Update visualization
-        std.debug.print("Before ctx.visualizer.update\n", .{});
         ctx.visualizer.update(delta_sec) catch |err| {
             std.log.err("Error updating visualizer: {}", .{err});
         };
-        std.debug.print("After ctx.visualizer.update\n", .{});
         
         // Render frame
         ctx.ui_renderer.setBackgroundColor(renderer.Color{
@@ -579,18 +665,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
         try ctx.ui_renderer.clear();
         
         // Render visualization
-        std.debug.print("Before ctx.visualizer.render\n", .{});
         ctx.visualizer.render() catch |err| {
             std.log.err("Error rendering visualization: {}", .{err});
         };
-        std.debug.print("Before ctx.visualizer.after\n", .{});
         
         // Render UI overlays
-        std.debug.print("Before renderUIOverlay\n", .{});
         renderUIOverlay(&ctx, delta_sec) catch |err| {
             std.log.err("Error rendering UI overlay: {}", .{err});
         };
-        std.debug.print("After renderUIOverlay\n", .{});
         
         // Present final frame
         ctx.ui_renderer.present();
@@ -607,19 +689,20 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 // Entry point for the UI module
-pub fn main() !void {
+pub fn main(allocator: std.mem.Allocator) !void {
     std.log.info("Initializing Necronet UI...", .{});
     
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const leaked = gpa.deinit();
-        if (leaked) {
-            std.log.err("Memory leak detected!", .{});
-        }
-    }
+    //var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    //defer {
+    //    const leaked = gpa.deinit();
+    //    if (leaked) {
+    //        std.log.err("Memory leak detected!", .{});
+    //    }
+    //}
     
-    const allocator = gpa.allocator();
+    //const allocator = gpa.allocator();
     try run(allocator);
+    //try testRendering(allocator);
     
     std.log.info("Necronet UI shutdown complete", .{});
 }

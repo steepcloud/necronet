@@ -126,7 +126,7 @@ pub fn main() !void {
         std.debug.print("IPC server initialized for UI communication\n", .{});
 
         const ui = @import("ui");
-        _ = try std.Thread.spawn(.{}, ui.run, .{allocator});
+        _ = try std.Thread.spawn(.{}, ui.main, .{allocator});
         std.debug.print("UI launched in separate thread\n", .{});
     }
 

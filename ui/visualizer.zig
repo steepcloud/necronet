@@ -109,26 +109,59 @@ pub const Visualizer = struct {
         
         return viz;
     }
+
+    pub fn createWithRenderer(allocator: std.mem.Allocator, existing_renderer: *rend.Renderer) !*Visualizer {
+        var viz = try allocator.create(Visualizer);
+        
+        viz.* = Visualizer{
+            .allocator = allocator,
+            .renderer = existing_renderer.*,
+            .flows = std.AutoHashMap(u64, NetworkFlow).init(allocator),
+            .alerts = std.ArrayList(SligAlert).init(allocator),
+            .pipe_texture = null,
+            .packet_textures = [_]?*sdl.SDL_Texture{null} ** 4,
+            .slig_textures = [_]?*sdl.SDL_Texture{null} ** 3,
+            .view_mode = .Overview,
+            .layout_columns = 4,
+            .pipe_spacing = 20,
+            .pipe_length = 200,
+            .visualization_mode = 0,
+            .animation_time = 0,
+        };
+        
+        try viz.loadAssets();
+        
+        return viz;
+    }
     
     // Load textures and assets (with fallback to colored rectangles)
     fn loadAssets(self: *Visualizer) !void {
         // Try to load textures, but don't fail if they're missing
-        self.pipe_texture = loadTexture(&self.renderer, "assets/pipes/pipe_normal.png") catch |err| {
-            std.log.warn("Could not load pipe texture: {}, using fallback", .{err});
-            return; // Continue without textures
-        };
+        //self.pipe_texture = loadTexture(&self.renderer, "assets/pipes/pipe_normal.png") catch |err| {
+        //    std.log.warn("Could not load pipe texture: {}, using fallback", .{err});
+        //    return; // Continue without textures
+        //};
         
         // Load packet textures for different protocols
-        self.packet_textures[0] = loadTexture(&self.renderer, "assets/pipes/packet_tcp.png") catch null;
-        self.packet_textures[1] = loadTexture(&self.renderer, "assets/pipes/packet_udp.png") catch null;
-        self.packet_textures[2] = loadTexture(&self.renderer, "assets/pipes/packet_icmp.png") catch null;
-        self.packet_textures[3] = loadTexture(&self.renderer, "assets/pipes/packet_other.png") catch null;
+        //self.packet_textures[0] = loadTexture(&self.renderer, "assets/pipes/packet_tcp.png") catch null;
+        //self.packet_textures[1] = loadTexture(&self.renderer, "assets/pipes/packet_udp.png") catch null;
+        //self.packet_textures[2] = loadTexture(&self.renderer, "assets/pipes/packet_icmp.png") catch null;
+        //self.packet_textures[3] = loadTexture(&self.renderer, "assets/pipes/packet_other.png") catch null;
         
         
         // Load slig textures for alerts
-        self.slig_textures[0] = loadTexture(&self.renderer, "assets/threats/slig_normal.png") catch null;
-        self.slig_textures[1] = loadTexture(&self.renderer, "assets/threats/slig_alert.png") catch null;
-        self.slig_textures[2] = loadTexture(&self.renderer, "assets/threats/slig_critical.png") catch null;
+        //self.slig_textures[0] = loadTexture(&self.renderer, "assets/threats/slig_normal.png") catch null;
+        //self.slig_textures[1] = loadTexture(&self.renderer, "assets/threats/slig_alert.png") catch null;
+        //self.slig_textures[2] = loadTexture(&self.renderer, "assets/threats/slig_critical.png") catch null;
+
+        self.pipe_texture = null;
+        for (0..self.packet_textures.len) |i| {
+            self.packet_textures[i] = null;
+        }
+
+        for (0..self.slig_textures.len) |i| {
+            self.slig_textures[i] = null;
+        }
     }
     
     // Helper to load a texture
