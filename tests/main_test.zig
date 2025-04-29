@@ -1,40 +1,18 @@
 const std = @import("std");
 const testing = std.testing;
-const backend = @import("backend");
-const parser = @import("parser");
-const common = @import("common");
 
-pub const test_capture = @import("test_bnd_capture.zig");
-pub const test_detection = @import("test_bnd_detection.zig");
-pub const test_parser = @import("test_bnd_parser.zig");
-pub const test_ipc = @import("test_ipc.zig");
-pub const test_ipc_messages = @import("test_ipc_messages.zig");
+// This file serves as the main test runner for all Necronet test modules.
+// It imports and runs all tests from the specialized test modules.
+// To run all tests: `zig build test`
+
+comptime {
+    _ = @import("test_bnd_capture.zig");
+    _ = @import("test_bnd_detection.zig");
+    _ = @import("test_bnd_parser.zig");
+    _ = @import("test_ipc.zig");
+    _ = @import("test_ipc_messages.zig");
+}
 
 test {
-    @import("std").testing.refAllDecls(@This());
-}
-
-test "capture test" {
-    std.debug.print("RUNNING CAPTURE TEST\n", .{});
-    try testing.expect(true);
-}
-
-test "detection test" {
-    std.debug.print("RUNNING DETECTION TEST\n", .{});
-    try testing.expect(true);
-}
-
-test "parser test" {
-    std.debug.print("RUNNING PARSER TEST\n", .{});
-    try testing.expect(true);
-}
-
-test "ipc test" {
-    std.debug.print("RUNNING IPC TEST\n", .{});
-    try testing.expect(true);
-}
-
-test "ipc messages test" {
-    std.debug.print("RUNNING IPC MESSAGES TEST\n", .{});
-    try testing.expect(true);
+    std.testing.refAllDecls(@This());
 }
