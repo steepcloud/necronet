@@ -1,29 +1,44 @@
+///////////////////////////////////////////////////////////////////////////////
+// Network Security Detection Module
+//
+// This module implements an intrusion detection system (IDS) with support for:
+//   - Rule-based detection of suspicious network activities
+//   - Connection state tracking for stateful analysis
+//   - Signature-based and anomaly-based detection techniques
+//   - TCP state machine modeling for protocol analysis
+//   - Alert generation and management
+//
+// The design emphasizes extensibility (custom rule functions), efficiency
+// (hash-based lookups), and quality detection with minimal false positives.
+///////////////////////////////////////////////////////////////////////////////
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const capture = @import("backend");
 const common = @import("common");
 const log = std.log.scoped(.detection);
 
+/// Error types specific to detection operations
 pub const Error = error{
-    InitializationFailed,
-    RuleParsingFailed,
-    DetectionFailed,
-    MemoryError,
+    InitializationFailed, // failed to initialize detection engine
+    RuleParsingFailed, // failed to parse detection rule
+    DetectionFailed, // error during packet analysis
+    MemoryError, // memory allocation/management error
 };
 
 /// Severity level for detection events
 pub const AlertSeverity = enum {
-    Low,
-    Medium,
-    High,
-    Critical,
+    Low, // informational or low-impact events
+    Medium, // potentially suspicious activities
+    High, // likely malicious activities
+    Critical, // severe security incidents requiring immediate attention
 };
 
 /// Represents a detection event/alert
 pub const Alert = struct {
     /// Unique identifier for this alert
     id: u32,
-    /// When the alert was generated
+    /// When the alert was generated (Unix timestamp)
     timestamp: i64,
     /// Alert severity level
     severity: AlertSeverity,
@@ -66,22 +81,30 @@ pub const DetectionRule = struct {
     condition: *const fn(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool,
     /// Message template for alerts
     message_template: []const u8,
+    /// Whether this rule requires connection state tracking
     requires_conn_state: bool,
     
+    /// Free memory allocated for rule fields
     pub fn deinit(self: *DetectionRule, allocator: Allocator) void {
         allocator.free(self.name);
         allocator.free(self.message_template);
     }
 };
 
-/// Connection tracking key
+/// Connection tracking key for bidirectional flow identification
 pub const ConnectionKey = struct {
+    /// Source IPv4 address
     source_ip: [4]u8,
+    /// Destination IPv4 address
     dest_ip: [4]u8,
+    /// Source port number
     source_port: u16,
+    /// Destination port number
     dest_port: u16,
+    /// Protocol (TCP, UDP, ICMP)
     protocol: common.Protocol,
 
+    /// Create a connection key from packet info
     pub fn init(packet: capture.PacketInfo) ConnectionKey {
         return ConnectionKey{
             .source_ip = packet.source_ip,
@@ -92,6 +115,7 @@ pub const ConnectionKey = struct {
         };
     }
 
+    /// Generate a hash value for connection lookup
     pub fn hash(self: ConnectionKey) u64 {
         var hasher = std.hash.Wyhash.init(0);
         std.hash.autoHash(&hasher, self.source_ip);
@@ -102,6 +126,7 @@ pub const ConnectionKey = struct {
         return hasher.final();
     }
 
+    /// Compare two connection keys for equality
     pub fn eql(self: ConnectionKey, other: ConnectionKey) bool {
         return std.mem.eql(u8, &self.source_ip, &other.source_ip) and
             std.mem.eql(u8, &self.dest_ip, &other.dest_ip) and
@@ -113,40 +138,55 @@ pub const ConnectionKey = struct {
 
 /// TCP flags for stateful tracking
 pub const TcpFlags = struct {
-    syn: bool = false,
-    ack: bool = false,
-    fin: bool = false,
-    rst: bool = false,
-    psh: bool = false,
-    urg: bool = false,
+    syn: bool = false, // SYN flag (Synchronize sequence numbers)
+    ack: bool = false, // ACK flag (Acknowledgment field significant)
+    fin: bool = false, // FIN flag (No more data from sender)
+    rst: bool = false, // RST flag (Reset the connection)
+    psh: bool = false, // PSH flag (Push function)
+    urg: bool = false, // URG flag (Urgent pointer field significant)
 
+    /// Extract TCP flags from a packet
     pub fn fromPacket(packet_data: []const u8, tcp_header_offset: usize) TcpFlags {
+        // ensure packet has enough data for TCP header
         if (packet_data.len < tcp_header_offset + 14) return TcpFlags{};
 
+        // extract the flags byte (offset 13 in TCP header)
         const flags_byte = packet_data[tcp_header_offset + 13];
+
+        // parse individual flags
         return TcpFlags{
-            .fin = (flags_byte & 0x01) != 0,
-            .syn = (flags_byte & 0x02) != 0,
-            .rst = (flags_byte & 0x04) != 0,
-            .psh = (flags_byte & 0x08) != 0,
-            .ack = (flags_byte & 0x10) != 0,
-            .urg = (flags_byte & 0x20) != 0,
+            .fin = (flags_byte & 0x01) != 0, // FIN - bit 0
+            .syn = (flags_byte & 0x02) != 0, // SYN - bit 1
+            .rst = (flags_byte & 0x04) != 0, // RST - bit 2
+            .psh = (flags_byte & 0x08) != 0, // PSH - bit 3
+            .ack = (flags_byte & 0x10) != 0, // ACK - bit 4
+            .urg = (flags_byte & 0x20) != 0, // URG - bit 5
         };
     }
 };
 
 /// Connection state for stateful analysis
 pub const ConnectionState = struct {
+    /// Connection identifier
     key: ConnectionKey,
+    /// When the connection was first observed (Unix timestamp)
     first_seen: i64,
+    /// When the connection was last observed (Unix timestamp)
     last_seen: i64,
+    /// Total packets in this connection
     packet_count: u32,
+    /// Total bytes in this connection
     byte_count: u64,
+    /// Packet rate (packets/second) - exponentially weighted moving average
     packets_per_second: f32,
+    /// Bandwidth usage (bytes/second) - exponentially weighted moving average
     bytes_per_second: f32,
+    /// Current state in TCP state machine
     tcp_state: TcpConnectionState,
+    /// Sample of payload data for pattern matching (optional)
     payload_sample: ?[]u8 = null,
     
+    /// Free memory allocated for connection state
     pub fn deinit(self: *ConnectionState, allocator: Allocator) void {
         if (self.payload_sample) |sample| {
             allocator.free(sample);
@@ -156,29 +196,37 @@ pub const ConnectionState = struct {
 };
 
 /// TCP connection states for protocol state machine
+/// Based on standard TCP state diagram (RFC 793)
 pub const TcpConnectionState = enum {
-    Unknown,
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    CloseWait,
-    Closing,
-    LastAck,
-    TimeWait,
-    Closed,
+    Unknown,        // initial or indeterminate state
+    SynSent,        // client sent SYN, awaiting SYN-ACK
+    SynReceived,    // server sent SYN-ACK, awaiting ACK
+    Established,    // connection established, data transfer
+    FinWait1,       // FIN sent, awaiting ACK or FIN-ACK
+    FinWait2,       // FIN ACK'd, awaiting FIN
+    CloseWait,      // received FIN, awaiting close from app
+    Closing,        // both sides sent FIN, awaiting ACK
+    LastAck,        // sent FIN after close from app, awaiting ACK
+    TimeWait,       // waiting for delayed segments to expire
+    Closed,         // connection fully terminated
 };
 
 /// Tracks connection states for stateful analysis
 pub const ConnectionTracker = struct {
+    /// Memory allocator for dynamic allocations
     allocator: Allocator,
+    /// Map of active connections (hash -> state)
     connections: std.AutoHashMap(u64, ConnectionState),
+    /// Last time stale connections were cleaned up
     last_cleanup: i64,
+    /// How often to run cleanup (seconds)
     cleanup_interval: i64,
+    /// Maximum idle time before a connection is considered stale (seconds)
     connection_timeout: i64,
+    /// Maximum number of connections to track
     max_connections: usize,
     
+    /// Initialize a new connection tracker
     pub fn init(allocator: Allocator) !ConnectionTracker {
         return ConnectionTracker{
             .allocator = allocator,
@@ -190,6 +238,7 @@ pub const ConnectionTracker = struct {
         };
     }
     
+    /// Clean up resources used by the connection tracker
     pub fn deinit(self: *ConnectionTracker) void {
         var it = self.connections.valueIterator();
         while (it.next()) |conn_state| {
@@ -198,40 +247,43 @@ pub const ConnectionTracker = struct {
         self.connections.deinit();
     }
     
-    /// Update connection state with new packet
+    /// Update connection state with new packet information
+    /// Returns a pointer to the updated or new connection state
     pub fn trackPacket(self: *ConnectionTracker, packet: capture.PacketInfo, packet_data: []const u8) !*ConnectionState {
+        // create connection key and hash from packet info
         const key = ConnectionKey.init(packet);
         const hash_key = key.hash();
         
         const now = std.time.timestamp();
         
-        // Check if periodic cleanup is needed
+        // run periodic cleanup if needed
         if (now - self.last_cleanup > self.cleanup_interval) {
             try self.cleanupStaleConnections();
             self.last_cleanup = now;
         }
 
-        // Get or create connection state
+        // update existing connection or create new one
         if (self.connections.getPtr(hash_key)) |conn| {
-            // Update existing connection
+            // update existing connection
             const time_diff = now - conn.last_seen;
             
-            // Update packet and byte counters
+            // update packet and byte counters
             conn.packet_count += 1;
             conn.byte_count += packet.captured_len;
             conn.last_seen = now;
             
-            // Update rate calculations with exponential moving average
+            // update rate calculations with exponential moving average
             if (time_diff > 0) {
-                const alpha: f32 = 0.3; // Smoothing factor
+                const alpha: f32 = 0.3; // smoothing factor
                 const packets_per_second = @as(f32, 1) / @as(f32, @floatFromInt(time_diff));
                 const bytes_per_second = @as(f32, @floatFromInt(packet.captured_len)) / @as(f32, @floatFromInt(time_diff));
                 
+                // smoothing formula: new_value = (1 - alpha) * old_value + alpha * sample
                 conn.packets_per_second = (1 - alpha) * conn.packets_per_second + alpha * packets_per_second;
                 conn.bytes_per_second = (1 - alpha) * conn.bytes_per_second + alpha * bytes_per_second;
             }
             
-            // Update TCP state machine if applicable
+            // update TCP state machine if applicable
             if (packet.protocol == .TCP) {
                 const tcp_header_offset = @sizeOf(capture.EthernetHeader) + @sizeOf(capture.IpV4Header);
                 if (packet_data.len >= tcp_header_offset) {
@@ -240,7 +292,7 @@ pub const ConnectionTracker = struct {
                 }
             }
             
-            // Sample payload for pattern matching (just store the first N bytes)
+            // sample payload for pattern matching (just store the first N bytes)
             if (conn.payload_sample == null and packet.captured_len > 0) {
                 const payload_offset = @sizeOf(capture.EthernetHeader) + @sizeOf(capture.IpV4Header);
                 if (packet.protocol == .TCP) {
@@ -260,12 +312,12 @@ pub const ConnectionTracker = struct {
             
             return conn;
         } else {
-            // Check if we've reached max connections before adding
+            // implement connection table limits
             if (self.connections.count() >= self.max_connections) {
-                // Force cleanup of stale connections
+                // try cleanup first to free space
                 try self.cleanupStaleConnections();
                 
-                // If still at capacity, remove oldest connection
+                // if still at capacity, remove oldest connection
                 if (self.connections.count() >= self.max_connections) {
                     var oldest_key: u64 = 0;
                     var oldest_time: i64 = now;
@@ -287,12 +339,13 @@ pub const ConnectionTracker = struct {
                 }
             }
             
-            // Create new connection state
+            // create new connection state
             var initial_tcp_state = TcpConnectionState.Unknown;
             if (packet.protocol == .TCP) {
                 const tcp_header_offset = @sizeOf(capture.EthernetHeader) + @sizeOf(capture.IpV4Header);
                 if (packet_data.len >= tcp_header_offset) {
                     const tcp_flags = TcpFlags.fromPacket(packet_data, tcp_header_offset);
+                    // if first packet is a SYN, mark as SynSent state
                     if (tcp_flags.syn and !tcp_flags.ack) {
                         initial_tcp_state = .SynSent;
                     }
@@ -310,7 +363,7 @@ pub const ConnectionTracker = struct {
                 .tcp_state = initial_tcp_state,
             };
             
-            // Sample payload for new connection
+            // sample payload for new connection
             const payload_offset = @sizeOf(capture.EthernetHeader) + @sizeOf(capture.IpV4Header);
             if (packet.protocol == .TCP) {
                 const tcp_header_size = @sizeOf(capture.TcpHeader);
@@ -331,7 +384,8 @@ pub const ConnectionTracker = struct {
         }
     }
     
-    /// Update TCP state machine
+    /// Update TCP state machine based on observed flags
+    /// Follows standard TCP state transitions as defined in RFC 793
     fn updateTcpState(self: *ConnectionTracker, current_state: TcpConnectionState, flags: TcpFlags) TcpConnectionState {
         _ = self; // unused
         
@@ -350,24 +404,26 @@ pub const ConnectionTracker = struct {
         };
     }
     
-    /// Remove stale connections
+    /// Remove inactive connections to prevent memory exhaustion
     fn cleanupStaleConnections(self: *ConnectionTracker) !void {
         const now = std.time.timestamp();
         
+        // create temporary list of keys to remove
         var keys_to_remove = std.ArrayList(u64).init(self.allocator);
         defer keys_to_remove.deinit();
         
+        // identify stale connections
         var it = self.connections.iterator();
         while (it.next()) |entry| {
             const conn = entry.value_ptr;
             
-            // Check if connection is stale
+            // check if connection is stale (inactive for too long)
             if (now - conn.last_seen > self.connection_timeout) {
                 try keys_to_remove.append(entry.key_ptr.*);
             }
         }
         
-        // Remove stale connections
+        // remove stale connections and free their resources
         for (keys_to_remove.items) |key| {
             if (self.connections.getPtr(key)) |conn| {
                 conn.deinit(self.allocator);
@@ -379,9 +435,13 @@ pub const ConnectionTracker = struct {
 
 /// Manager for all detection activities
 pub const DetectionEngine = struct {
+    /// Memory allocator for dynamic allocations
     allocator: Allocator,
+    /// List of detection rules
     rules: std.ArrayList(DetectionRule),
+    /// Counter for generating unique alert IDs
     alert_counter: std.atomic.Value(u32),
+    /// Connection tracker for stateful analysis
     connection_tracker: ConnectionTracker,
     
     /// Initialize a new detection engine
@@ -394,7 +454,7 @@ pub const DetectionEngine = struct {
         };
     }
     
-    /// Clean up all resources
+    /// Clean up all resources used by the detection engine
     pub fn deinit(self: *DetectionEngine) void {
         for (self.rules.items) |*rule| {
             rule.deinit(self.allocator);
@@ -403,38 +463,40 @@ pub const DetectionEngine = struct {
         self.connection_tracker.deinit();
     }
     
-    /// Add a detection rule
+    /// Add a detection rule to the engine
     pub fn addRule(self: *DetectionEngine, rule: DetectionRule) !void {
         try self.rules.append(rule);
     }
     
     /// Analyze a packet and return any alerts generated
+    /// This is the main entry point for packet analysis
     pub fn analyzePacket(
         self: *DetectionEngine, 
         packet_info: capture.PacketInfo,
         packet_data: []const u8,
     ) !?Alert {
-        // Tracking connection state
+        // update connection state tracking
         const conn_state = try self.connection_tracker.trackPacket(packet_info, packet_data);
 
-        // Checking stateless rules
+        // first check stateless rules (don't need connection context)
         if (try self.checkStatelessRules(packet_info)) |alert| {
             return alert;
         }
 
-        // Checking stateful rules using connection state
+        // then check stateful rules that use connection context
         return try self.checkStatefulRules(packet_info, conn_state);
     }
 
+    /// Check rules that don't require connection state
     fn checkStatelessRules(
         self: *DetectionEngine,
         packet_info: capture.PacketInfo
     ) !?Alert {
-        // Check each enabled rule
+        // check each enabled rule
         for (self.rules.items) |rule| {
             if (!rule.enabled or rule.requires_conn_state) continue;
             
-            // If the rule condition matches, generate an alert
+            // if the rule condition matches, generate an alert
             if (rule.condition(packet_info, null)) {
                 return try self.createAlert(rule, packet_info);
             }
@@ -442,6 +504,7 @@ pub const DetectionEngine = struct {
         return null;
     }
 
+    /// Check rules that require connection state
     fn checkStatefulRules(
         self: *DetectionEngine,
         packet_info: capture.PacketInfo,
@@ -457,14 +520,16 @@ pub const DetectionEngine = struct {
         return null;
     }
 
+    /// Create an alert from a triggered rule
     fn createAlert(
         self: *DetectionEngine,
         rule: DetectionRule,
         packet_info: capture.PacketInfo
     ) !Alert {
-        // get next alert ID
+        // get next alert ID (thread-safe)
         const alert_id = self.alert_counter.fetchAdd(1, .monotonic);
         
+        // format source IP as string (e.g. "192.168.1.1")
         const source_ip_str = try std.fmt.allocPrint(
             self.allocator,
             "{d}.{d}.{d}.{d}",
@@ -475,6 +540,7 @@ pub const DetectionEngine = struct {
         );
         defer self.allocator.free(source_ip_str);
 
+        // format destination IP as string
         const dest_ip_str = try std.fmt.allocPrint(
             self.allocator, 
             "{d}.{d}.{d}.{d}",
@@ -485,6 +551,7 @@ pub const DetectionEngine = struct {
         );
         defer self.allocator.free(dest_ip_str);
         
+        // format ports as strings
         const source_port_str = try std.fmt.allocPrint(
         self.allocator, "{d}", .{packet_info.source_port}
         );
@@ -495,8 +562,10 @@ pub const DetectionEngine = struct {
         );
         defer self.allocator.free(dest_port_str);
         
+        // get protocol name
         const protocol_str = @tagName(packet_info.protocol);
                 
+        // format alert message with connection details
         const message = try std.fmt.allocPrint(
             self.allocator,
             "Connection from {s}:{s} to {s}:{s} using {s} triggered rule: {s}",
@@ -510,9 +579,10 @@ pub const DetectionEngine = struct {
             }
         );
 
+        // use rule name as alert category
         const category = try self.allocator.dupe(u8, rule.name);
                 
-        // Create and return the alert
+        // create and return the alert
         return Alert{
             .id = alert_id,
             .timestamp = std.time.timestamp(),
@@ -527,9 +597,9 @@ pub const DetectionEngine = struct {
         };
     }
     
-    /// Load predefined rules
+    /// Load a set of predefined detection rules
     pub fn loadDefaultRules(self: *DetectionEngine) !void {
-        // Suspicious port detection
+        // suspicious port detection
         try self.addRule(DetectionRule{
             .id = 1001,
             .enabled = true,
@@ -557,6 +627,7 @@ pub const DetectionEngine = struct {
             .requires_conn_state = true,
         });
 
+        // Bandwidth usage detection
         try self.addRule(DetectionRule{
             .id = 1003,
             .enabled = true,
@@ -626,6 +697,7 @@ pub const DetectionEngine = struct {
             .requires_conn_state = true,
         });
 
+        // DNS protocol anomaly detection
         try self.addRule(DetectionRule{
             .id = 1008,
             .enabled = true,
@@ -657,13 +729,20 @@ pub const DetectionEngine = struct {
 
 /// Payload signature for pattern matching
 pub const PayloadSignature = struct {
+    /// Unique identifier for this signature
     id: u32,
+    /// Human-readable name
     name: []const u8,
+    /// Binary pattern to match in packet payload
     pattern: []const u8,
+    /// Category of attack (e.g., "Web AttacK", "Malware")
     category: []const u8,
+    /// Severity if detected
     severity: AlertSeverity,
 };
 
+/// Database of known malicious payload patterns
+/// These signatures detect common attack patterns in network traffic
 const PAYLOAD_SIGNATURES = [_]PayloadSignature{
     // SQL Injection signatures
     .{
@@ -894,23 +973,33 @@ const PAYLOAD_SIGNATURES = [_]PayloadSignature{
     },
 };
 
+/// Information about network ports and their security implications
 pub const PortInfo = struct {
+    /// Port number
     port: u16,
+    /// Service name typically associated with this port
     service: []const u8,
+    /// Category of service (e.g., "Backdoor", "Database")
     category: []const u8,
-    risk_level: u8, // 1-10 scale
+    /// Risk level on a scale of 1-10 (higher is more suspicious)
+    risk_level: u8,
 };
 
-// Structure to track port scanning state
+/// Structure to track port scanning state
 const PortScanState = struct {
+    /// When this source was last seen scanning
     last_seen: i64,
+    /// When this source was first seen scanning
     first_seen: i64,
+    /// Set of unique destination ports targeted
     target_ports: std.AutoHashMap(u16, void),
+    /// Set of unique destination IPs targeted
     target_ips: std.AutoHashMap([4]u8, void),
+    /// Rate of port scanning (ports/second)
     scan_rate: f32,
 };
 
-/// Known suspicious ports with context
+/// Database of suspicious ports with context
 const SUSPICIOUS_PORTS = [_]PortInfo{
     // Trojan/backdoor ports
     .{ .port = 31, .service = "Agent 31", .category = "Backdoor", .risk_level = 8 },
@@ -977,6 +1066,7 @@ const SUSPICIOUS_PORTS = [_]PortInfo{
 };
 
 /// Detect access to suspicious ports with context awareness
+/// Uses port knowledge base and traffic characteristics to identify suspicious activity
 fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     // Local helper function to get context description
     const getPortContext = struct {
@@ -999,21 +1089,21 @@ fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const Connecti
         port_info = context;
         detected_risk_level = context.risk_level;
         
-        // High risk ports are always suspicious
+        // high risk ports are always suspicious
         if (context.risk_level >= 8) {
             is_suspicious = true;
         }
-        // For medium risk ports, use additional context
+        // for medium risk ports, use additional context
         else if (context.risk_level >= 5) {
             // 2. Consider port context and traffic direction
             
-            // Clear text protocols crossing network boundaries are suspicious
+            // clear text protocols crossing network boundaries are suspicious
             if (std.mem.eql(u8, context.category, "ClearText") and 
                 !isPrivateIP(packet.dest_ip)) {
                 is_suspicious = true;
             }
             
-            // Database services exposed to the internet are suspicious
+            // database services exposed to the internet are suspicious
             else if (std.mem.eql(u8, context.category, "Database") and 
                     !isPrivateIP(packet.dest_ip)) {
                 is_suspicious = true;
@@ -1059,7 +1149,7 @@ fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const Connecti
     // 3. Check source port too (could be a covert channel)
     if (!is_suspicious) {
         if (getPortContext(packet.source_port)) |context| {
-            // Source ports matching high-risk services are unusual
+            // source ports matching high-risk services are unusual
             if (context.risk_level >= 7) {
                 is_suspicious = true;
                 port_info = context;
@@ -1082,7 +1172,7 @@ fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const Connecti
         }
         
         if (conn_state.?.payload_sample) |payload| {
-            // Looks like HTTP but not on standard port
+            // looks like HTTP but not on standard port
             if (!is_standard_http_port and isHttpTraffic(payload)) {
                 is_suspicious = true;
                 detected_risk_level = 7;
@@ -1116,8 +1206,7 @@ fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const Connecti
             }
         }
     }
-    
-    // Log the detection details for debugging
+
     if (is_suspicious and port_info != null) {
         log.debug("Suspicious port {d} ({s}) detected with risk level {d}", 
             .{ port_info.?.port, port_info.?.service, port_info.?.risk_level });
@@ -1126,17 +1215,17 @@ fn detectSuspiciousPort(packet: capture.PacketInfo, conn_state: ?*const Connecti
     return is_suspicious;
 }
 
-/// Detect unusually large packets
+/// Detect unusually large packets (potential data exfiltration or buffer overflow)
 fn detectLargePacket(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     _ = conn_state; // not used
-    const LARGE_PACKET_THRESHOLD: u32 = 8000;
+    const LARGE_PACKET_THRESHOLD: u32 = 8000; // bytes
     return packet.captured_len > LARGE_PACKET_THRESHOLD;
 }
 
-/// Detect high packet rate (potential DoS)
+/// Detect high packet rate (potential DoS attack)
 fn detectHighPacketRate(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
-        // Alert if packet rate exceeds threshold and we've seen enough packets
+        // alert if packet rate exceeds threshold and we've seen enough packets
         const PACKET_RATE_THRESHOLD: f32 = 100.0; // packets per second
         const MIN_PACKETS_NEEDED: u32 = 20; // minimum sample size
 
@@ -1147,10 +1236,10 @@ fn detectHighPacketRate(_: capture.PacketInfo, conn_state: ?*const ConnectionSta
     return false;
 }
 
-/// Detect high bandwidth usage
+/// Detect high bandwidth usage (potential DoS or data exfiltration)
 fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
-        // Alert if bandwidth exceeds threshold (10MB/s) and we've seen enough traffic
+        // alert if bandwidth exceeds threshold (10MB/s) and we've seen enough traffic
         const BANDWIDTH_THRESHOLD: f32 = 10.0 * 1024.0 * 1024.0; // 10 MB/s
         const MIN_BYTES_NEEDED: u64 = 100 * 1024; // 100KB minimum sample
         
@@ -1160,10 +1249,10 @@ fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionStat
     return false;
 }
 
-/// Detect SYN flood attacks
+/// Detect SYN flood attacks (TCP DoS technique)
 pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
-        // Alert on connections that stay in SYN_SENT state with multiple packets
+        // alert on connections that stay in SYN_SENT state with multiple packets
         const SYN_FLOOD_PACKET_THRESHOLD: u32 = 200;
 
         const now = std.time.timestamp();
@@ -1179,7 +1268,7 @@ pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState
 
 /// Enhanced port scan detection using both connection-level and global heuristics
 fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
-    // Perform connection-level checks first
+    // perform connection-level checks first
     if (conn_state) |conn| {
         // 1. Connection-level characteristics of port scans
         
@@ -1191,7 +1280,7 @@ fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionStat
         const is_fin_scan = packet.protocol == .TCP and 
                           (conn.tcp_state == .Unknown or conn.tcp_state == .Closed);
                           
-        // Short connection with very little data
+        // short connection with very little data (typical of scans)
         const is_short_conn = conn.packet_count <= 2;
         const low_data_volume = conn.byte_count < 100;
         
@@ -1205,7 +1294,7 @@ fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionStat
                 packet.source_ip, packet.dest_ip, packet.dest_port, now
             ) catch false;
             
-            // If this looks like a scan and fits into a larger pattern, alert
+            // if this looks like a scan and fits into a larger pattern, alert
             if (is_part_of_scan) {
                 return true;
             }
@@ -1215,7 +1304,7 @@ fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionStat
     return false;
 }
 
-/// Check if IP is in private ranges
+/// Check if IP is in private ranges (RFC 1918)
 fn isPrivateIP(ip: [4]u8) bool {
     // Localhost/loopback 127.0.0.0/8
     if (ip[0] == 127) {
@@ -1240,8 +1329,9 @@ fn isPrivateIP(ip: [4]u8) bool {
     return false;
 }
 
-/// Detect payload patterns (signatures)
+/// Detect malicious payload patterns (signature-based detection)
 fn detectPayloadPattern(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+    // first check direct payload if available
     if (packet.payload) |direct_payload| {
         // only checking TCP and UDP packets with payload
         if (packet.protocol == .TCP or packet.protocol == .UDP) {
@@ -1256,7 +1346,7 @@ fn detectPayloadPattern(packet: capture.PacketInfo, conn_state: ?*const Connecti
         }
     }
 
-    // check connection state payload sample as backup
+    // then check connection state payload sample as backup
     if (conn_state) |conn| {
         if (conn.payload_sample) |payload_sample| {
             // check TCP and UDP packets
@@ -1276,18 +1366,18 @@ fn detectPayloadPattern(packet: capture.PacketInfo, conn_state: ?*const Connecti
     return false;
 }
 
-/// Detect HTTP protocol anomalies
+/// Detect HTTP protocol anomalies and attacks
 fn detectHttpAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         if (conn.payload_sample) |payload| {
             if (packet.protocol != .TCP) return false;
             
-            // Only check if it looks like HTTP traffic
+            // only check if it looks like HTTP traffic
             if (!isHttpTraffic(payload)) return false;
             
-            // Check for oversized HTTP headers (potential buffer overflow)
+            // check for oversized HTTP headers (potential buffer overflow)
             if (std.mem.indexOf(u8, payload, "Content-Length: ")) |pos| {
-                // Extract length value
+                // extract length value
                 var end_pos: usize = pos + 16; // "Content-Length: " is 16 chars
                 while (end_pos < payload.len and payload[end_pos] >= '0' and payload[end_pos] <= '9') {
                     end_pos += 1;
@@ -1296,10 +1386,10 @@ fn detectHttpAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionS
                 if (end_pos > pos + 16) {
                     const length_str = payload[pos+16..end_pos];
                     const content_length = std.fmt.parseInt(u32, length_str, 10) catch {
-                        return false; // Invalid integer
+                        return false; // invalid integer
                     };
                     
-                    // Alert on suspiciously large content length
+                    // alert on suspiciously large content length
                     const MAX_REASONABLE_SIZE: u32 = 10 * 1024 * 1024; // 10MB
                     if (content_length > MAX_REASONABLE_SIZE) {
                         return true;
@@ -1307,7 +1397,7 @@ fn detectHttpAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionS
                 }
             }
             
-            // Check for very long URL (potential DoS/buffer overflow)
+            // check for very long URL (potential DoS/buffer overflow)
             if (std.mem.indexOf(u8, payload, "GET ")) |pos| {
                 var end_pos: usize = pos + 4;
                 while (end_pos < payload.len and payload[end_pos] != ' ') {
@@ -1315,7 +1405,7 @@ fn detectHttpAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionS
                 }
                 
                 const url_length = end_pos - (pos + 4);
-                const MAX_URL_LENGTH: usize = 2000; // Reasonable URL length
+                const MAX_URL_LENGTH: usize = 2000; // reasonable URL length
                 
                 if (url_length > MAX_URL_LENGTH) {
                     return true;
@@ -1327,7 +1417,9 @@ fn detectHttpAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionS
     return false;
 }
 
+/// Check if payload appears to be HTTP traffic
 fn isHttpTraffic(payload: []const u8) bool {
+    // Common HTTP methods and response patterns
     const HTTP_METHODS = [_][]const u8{
         "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "CONNECT ", "TRACE ",
         "HTTP/1.", // For responses
@@ -1342,14 +1434,16 @@ fn isHttpTraffic(payload: []const u8) bool {
     return false;
 }
 
-/// Detect DNS protocol anomalies
+/// Detect DNS protocol anomalies and potential DNS tunneling
+/// Analyzes DNS packets for unusual patterns that may indicate abuse
+/// Including: oversized packets, high entropy domain names, excessive subdomains
 fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         if (conn.payload_sample) |payload| {
             if (packet.protocol != .UDP or (packet.dest_port != 53 and packet.source_port != 53)) 
                 return false;
             
-            // Basic check for DNS query packet format
+            // basic check for DNS query packet format
             if (payload.len < 12) return false; // DNS header is 12 bytes
 
             // 1. Extract DNS header fields
@@ -1365,7 +1459,7 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
             const opcode = (flags >> 11) & 0xF;
 
             // 2. Check for unusual query types
-            if (opcode != 0) { // Not a standard query
+            if (opcode != 0) { // not a standard query
                 const rare_opcodes = [_]u4{ 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
                 for (rare_opcodes) |code| {
                     if (opcode == code) return true;
@@ -1391,7 +1485,7 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
                 // extracting domain parts
                 while (i < payload.len) {
                     const label_len = payload[i];
-                    if (label_len == 0) break; // End of QNA
+                    if (label_len == 0) break; // end of QNA
 
                     // checking for label length conformance
                     if (label_len > 63) return true; // RFC violation
@@ -1414,7 +1508,7 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
                 }
 
                 // 5. Check for excessive length
-                if (total_domain_len > 255) return true; // Max allowed by DNS
+                if (total_domain_len > 255) return true; // max allowed by DNS
 
                 // 6. Calculate entropy (Shannon entropy for detecting encoded/encrypted data)
                 if (total_domain_len > 0) {
@@ -1496,17 +1590,27 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
     return false;
 }
 
-/// Track port scan attempts using global state
+/// Global tracker for port scanning activities across all connections
+/// Maintains state about scanning patterns to detect horizontal, vertical and block scans
 const PortScanTracker = struct {
-    // Track unique source IPs scanning multiple ports
+    /// Maps source IPs to their scanning activity state
     var ip_scan_attempts = std.AutoHashMap([4]u8, PortScanState).init(std.heap.page_allocator);
     
-    // Last cleanup time for IP scan tracker
+    /// Timestamp of last cleanup operation
     var last_cleanup: i64 = 0;
     
-    // Track scans by IP
+    /// Process a potential scanning packet and determine if it's part of a port scan
+    /// 
+    /// Parameters:
+    ///   source_ip: IP address initiating the connection
+    ///   dest_ip: Target IP address
+    ///   dest_port: Target port number
+    ///   now: Current timestamp
+    /// 
+    /// Returns:
+    ///   true if this packet appears to be part of a port scan pattern
     pub fn trackScan(source_ip: [4]u8, dest_ip: [4]u8, dest_port: u16, now: i64) !bool {
-        // Cleanup old entries every 5 minutes
+        // cleanup old entries every 5 minutes
         if (now - last_cleanup > 300) {
             try cleanupOldEntries(now);
             last_cleanup = now;
@@ -1515,11 +1619,11 @@ const PortScanTracker = struct {
         var is_scan = false;
         var scan_state: *PortScanState = undefined;
         
-        // Get or create scan state for this source IP
+        // get or create scan state for this source IP
         if (ip_scan_attempts.getPtr(source_ip)) |state| {
             scan_state = state;
         } else {
-            // Initialize new scan state
+            // initialize new scan state
             try ip_scan_attempts.put(source_ip, PortScanState{
                 .last_seen = now,
                 .target_ports = std.AutoHashMap(u16, void).init(std.heap.page_allocator),
@@ -1530,12 +1634,12 @@ const PortScanTracker = struct {
             scan_state = ip_scan_attempts.getPtr(source_ip).?;
         }
         
-        // Update scan state
+        // update scan state with new target information
         scan_state.last_seen = now;
         try scan_state.target_ports.put(dest_port, {});
         try scan_state.target_ips.put(dest_ip, {});
         
-        // Calculate scan rate
+        // calculate scan rate (ports per second)
         const time_window = now - scan_state.first_seen;
         if (time_window > 0) {
             scan_state.scan_rate = @as(f32, @floatFromInt(scan_state.target_ports.count())) / 
@@ -1569,12 +1673,13 @@ const PortScanTracker = struct {
         return is_scan;
     }
     
-    // Clean up old entries to prevent memory leaks
+    /// Remove old scan tracking entries to prevent memory exhaustion
+    /// Frees resources for sources that haven't been active recently
     fn cleanupOldEntries(now: i64) !void {
         var to_remove = std.ArrayList([4]u8).init(std.heap.page_allocator);
         defer to_remove.deinit();
         
-        // Find old entries (older than 30 minutes)
+        // find old entries (older than 30 minutes)
         var it = ip_scan_attempts.iterator();
         while (it.next()) |entry| {
             const state = entry.value_ptr;
@@ -1583,9 +1688,8 @@ const PortScanTracker = struct {
             }
         }
         
-        // Remove old entries
+        // remove old entries and free their resources
         for (to_remove.items) |ip| {
-            // Free resources
             if (ip_scan_attempts.getPtr(ip)) |state| {
                 state.target_ports.deinit();
                 state.target_ips.deinit();
@@ -1594,6 +1698,7 @@ const PortScanTracker = struct {
         }
     }
     
+    /// Free all resources used by the port scan tracker
     pub fn deinit() void {
         var it = ip_scan_attempts.iterator();
         while (it.next()) |entry| {

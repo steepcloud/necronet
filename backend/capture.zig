@@ -1,3 +1,18 @@
+///////////////////////////////////////////////////////////////////////////////
+// Network Packet Capture Module
+//
+// This module provides an interface to the pcap library for capturing and 
+// analyzing network packets. It includes functionality for:
+//   - Discovering network interfaces
+//   - Capturing raw packets from network interfaces
+//   - Parsing packet headers (Ethernet, IPv4, TCP, UDP, ICMP)
+//   - Extracting packet metadata and payload
+//
+// The implementation handles network byte order conversions and provides
+// structured access to network protocol fields while abstracting away the
+// lower-level pcap C interface.
+///////////////////////////////////////////////////////////////////////////////
+
 const std = @import("std");
 const Endian = std.builtin.Endian;
 const Allocator = std.mem.Allocator;
@@ -8,123 +23,145 @@ pub const c = @cImport({
     @cInclude("pcap_wrapper.h");
 });
 
+/// Error types specific to packet capture operations
 pub const Error = error{
-    NoDevicesFound,
-    DeviceNotFound,
-    CaptureInitFailed,
-    SetFilterFailed,
-    PacketCaptureFailed,
-    InvalidPacketHeader,
+    NoDevicesFound, // no network interfaces were found
+    DeviceNotFound, // the requested network device could not be found
+    CaptureInitFailed, // failed to initialize the packet capture session
+    SetFilterFailed, // failed to set the capture filter
+    PacketCaptureFailed, // error occured during packet capture
+    InvalidPacketHeader, // packet header is malformed or truncated
 };
 
+/// Represents a network interface available for packet capture
 pub const Interface = struct {
-    name: []const u8,
-    description: ?[]const u8,
-    is_loopback: bool,
+    name: []const u8, // system identifier for the interface
+    description: ?[]const u8, // human-readable description (may be null)
+    is_loopback: bool, // whether this is a loopback interface
 };
 
+/// Raw packet data as returned directly from pcap
 pub const RawPacketData = struct {
-    header: c.struct_pcap_pkthdr,
-    packet_data: []u8,
+    header: c.struct_pcap_pkthdr, // metadata about the captured packet
+    packet_data: []u8, // raw binary packet data
 };
 
+/// Parsed information about a captured network packet
 pub const PacketInfo = struct {
-    source_ip: [4]u8,
-    dest_ip: [4]u8,
-    source_port: u16,
-    dest_port: u16,
-    protocol: common.Protocol,
-    captured_len: u32, // caplen
-    original_len: u32, // len
-    timestamp_sec: i64,
-    timestamp_usec: i64, // for precision
-    checksum: u16,
-    payload: ?[]const u8,
+    source_ip: [4]u8, // source IPv4 address in network byte order
+    dest_ip: [4]u8, // destination IPv4 address in network byte order
+    source_port: u16, // source port (TCP/UDP) or type (ICMP)
+    dest_port: u16, // destination port (TCP/UDP) or code (ICMP)
+    protocol: common.Protocol, // protocol type (TCP, UDP, ICMP, etc.)
+    captured_len: u32, // length of captured packet data (may be truncated)
+    original_len: u32, // original length of packet on wire
+    timestamp_sec: i64, // timestamp seconds component
+    timestamp_usec: i64, // timestamp microseconds component
+    checksum: u16, // transport layer checksum
+    payload: ?[]const u8, // protocol payload data (application layer)
     tcp_flags: u8 = 0, // TCP flags (SYN, ACK, etc.)
-    ip_flags: u8 = 0, //IP flags (fragmentation, etc.)
-    flow_id: ?u64 = null, // optional flow ID for tracking
+    ip_flags: u8 = 0, // IP flags (fragmentation, etc.)
+    flow_id: ?u64 = null, // optional flow ID for tracking related packets
 };
 
+/// Ethernet frame header structure
 pub const EthernetHeader = extern struct {
-    dest_mac: [6]u8,
-    src_mac: [6]u8,
-    ether_type: u16, // Big Endian
+    dest_mac: [6]u8, // destination MAC address
+    src_mac: [6]u8, // source MAC address
+    ether_type: u16, // ethernet type field in network byte order
 
+    /// Get the EtherType value in host byte order
     pub fn etherType(self: EthernetHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.ether_type));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
+/// IPv4 packet header structure
 pub const IpV4Header = extern struct {
     version_ihl: u8, // version: 4 bits, ihl: 4 bits
     dscp_ecn: u8, // dscp: 6 bits, ecn: 2 bits
-    total_length: u16, // Big Endian
-    identification: u16, // Big Endian
+    total_length: u16, // total length in network byte order
+    identification: u16, // identification field in network byte order
     flags_fragment_offset: u16, // flags: 3 bits, fragment offset: 13 bits
-    ttl: u8,
-    protocol: u8,
-    checksum: u16, // Big Endian
-    source_ip: [4]u8, // Network order (Big Endian conceptually)
-    dest_ip: [4]u8, // Network order
+    ttl: u8, // time to live
+    protocol: u8, // protocol number (TCP=6, UDP=17, ICMP=1)
+    checksum: u16, // header checksum in network byte order
+    source_ip: [4]u8, // source IP adddress in network byte order
+    dest_ip: [4]u8, // destination IP address in network byte order
 
+    /// Get the Internet Header Length value (4 bits)
     pub fn ihl(self: IpV4Header) u8 {
         return self.version_ihl & 0x0F;
     }
 
+    /// Get the header length in bytes
     pub fn headerLength(self: IpV4Header) u8 {
         return self.ihl() * 4;
     }
 
+    /// Get the total length in host byte order
     pub fn totalLength(self: IpV4Header) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.total_length));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
+/// TCP header structure
 pub const TcpHeader = extern struct {
-    source_port: u16, // Big Endian
-    dest_port: u16, // Big Endian
-    sequence_number: u32, // Big Endian
-    ack_number: u32, // Big Endian
+    source_port: u16, // source port in network byte order
+    dest_port: u16, // destination port in network byte order
+    sequence_number: u32, // sequence number in network byte order
+    ack_number: u32, // acknowledgment number in network byte order
     data_offset_reserved_flags: u16, // Big Endian: Data Offset (4), Reserved (3), NS(1), CWR(1), ECE(1), URG(1), ACK(1), PSH(1), RST(1), SYN(1), FIN(1)
-    window_size: u16, // Big Endian
-    checksum: u16, // Big Endian
-    urgent_pointer: u16, // Big Endian
-    // Options follow here, variable length
+    window_size: u16, // window size in network byte order
+    checksum: u16, // checksum in network byte order
+    urgent_pointer: u16, // urgent pointer in network byte order
 
+    /// Get source port in host byte order
     pub fn sourcePort(self: TcpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.source_port));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+
+    /// Get destination port in host byte order
     pub fn destPort(self: TcpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.dest_port));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+
+    /// Get sequence number in host byte order
     pub fn sequenceNumber(self: TcpHeader) u32 {
         const ptr = @as(*const [4]u8, @ptrCast(&self.sequence_number));
         return std.mem.readInt(u32, ptr, Endian.big);
     }
+
+    /// Get acknowledgment number in host byte order
     pub fn ackNumber(self: TcpHeader) u32 {
         const ptr = @as(*const [4]u8, @ptrCast(&self.ack_number));
         return std.mem.readInt(u32, ptr, Endian.big);
     }
-    // Helper to get Data Offset (header length in 32-bit words)
+    
+    /// Get the data offset value (header length in 32-bit words)
     pub fn dataOffset(self: TcpHeader) u4 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.data_offset_reserved_flags));
         const val = std.mem.readInt(u16, ptr, Endian.big);
-        return @intCast(val >> 12); // Top 4 bits
+        return @intCast(val >> 12); // top 4 bits
     }
-    // Helper to get header length in bytes
+
+    /// Get TCP header length in bytes
     pub fn headerLength(self: TcpHeader) u8 {
         return @as(u8, self.dataOffset()) * 4;
     }
-    // Individual flag helpers
+    
+    /// Get all TCP flags as a 9-bit value
     pub fn flags(self: TcpHeader) u9 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.data_offset_reserved_flags));
         const val = std.mem.readInt(u16, ptr, Endian.big);
-        return @intCast(val & 0x1FF); // Lower 9 bits
+        return @intCast(val & 0x1FF); // lower 9 bits
     }
+
+    /// Get the TCP flags as individual boolean values
     pub fn flagFIN(self: TcpHeader) bool { return (self.flags() & 0x001) != 0; }
     pub fn flagSYN(self: TcpHeader) bool { return (self.flags() & 0x002) != 0; }
     pub fn flagRST(self: TcpHeader) bool { return (self.flags() & 0x004) != 0; }
@@ -135,51 +172,74 @@ pub const TcpHeader = extern struct {
     pub fn flagCWR(self: TcpHeader) bool { return (self.flags() & 0x080) != 0; }
     pub fn flagNS(self: TcpHeader) bool { return (self.flags() & 0x100) != 0; }
 
+    /// Get the window size in host byte order
     pub fn windowSize(self: TcpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.window_size));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+
+    /// Get checksum in host byte order
     pub fn getChecksum(self: TcpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+
+    /// Get urgent pointer in host byte order
     pub fn urgentPointer(self: TcpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.urgent_pointer));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
+/// UDP header structure
 pub const UdpHeader = extern struct {
-    source_port: u16, // Big Endian
-    dest_port: u16, // Big Endian
-    length: u16, // Big Endian - Length of UDP header + data
-    checksum: u16, // Big Endian
+    source_port: u16, // source port in network byte order
+    dest_port: u16, // destination port in network byte order
+    length: u16, // Big Endian - Length of UDP header + data (network byte order)
+    checksum: u16, // checksum in network byte order
 
+    /// Get source port in host byte order
     pub fn sourcePort(self: UdpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.source_port));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+    
+    /// Get destination port in host byte order
     pub fn destPort(self: UdpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.dest_port));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
-    // Returns length of UDP header + UDP data
+    
+    /// Get total length of UDP header and data in host byte order
     pub fn getLength(self: UdpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.length));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
+
+    /// Get checksum in host byte order
     pub fn getChecksum(self: UdpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
 };
 
+/// Active packet capture session
 pub const CaptureSession = struct {
-    handle: ?*c.pcap_t,
-    device_name: []const u8,
-    allocator: Allocator,
+    handle: ?*c.pcap_t, // handle to pcap capture session
+    device_name: []const u8, // name of the capture device
+    allocator: Allocator, // memory allocator for this session
 
-    // Creates a new capture session for the specified device
+    /// Creates a new packet capture session on the specified network interface
+    ///
+    /// Parameters:
+    ///   allocator: Memory allocator for managing resources
+    ///   device_name: Network interface name to capture from
+    ///   promiscuous: Whether to enable promiscuous mode
+    ///   timeout_ms: Capture timeout in milliseconds
+    ///   snapshot_len: Maximum number of bytes to capture per packet
+    ///
+    /// Returns:
+    ///   A new CaptureSession or an error if initialization fails
     pub fn init(
         allocator: Allocator, 
         device_name: []const u8, 
@@ -189,6 +249,7 @@ pub const CaptureSession = struct {
     ) !CaptureSession {
         var errbuf: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
         
+        // open the device for live capture
         const handle = c.pcap_open_live(
             @ptrCast(device_name.ptr),
             @intCast(snapshot_len),
@@ -209,7 +270,7 @@ pub const CaptureSession = struct {
         };
     }
     
-    // Clean up resources
+    /// Cleans up resources used by the capture session
     pub fn deinit(self: *CaptureSession) void {
         if (self.handle) |handle| {
             c.pcap_close(handle);
@@ -218,6 +279,16 @@ pub const CaptureSession = struct {
         self.allocator.free(self.device_name);
     }
     
+    /// Sets a BPF filter on the capture session to control which packets are captured
+    ///
+    /// This function supports both standard BPF filter syntax and common shorthand
+    /// expressions like "dns", "http", etc.
+    ///
+    /// Parameters:
+    ///   filter_str: BPF filter expression or shorthand term
+    ///
+    /// Returns:
+    ///   Error if the filter cannot be compiled or applied
     pub fn setFilter(self: *CaptureSession, filter_str: []const u8) !void {
         // expand shorthand filters to proper BPF syntax
         const expanded_filter = try expandFilterExpression(filter_str, self.allocator);
@@ -241,7 +312,7 @@ pub const CaptureSession = struct {
         }
         defer c.pcap_freecode(&program);
         
-        // Apply the filter
+        // apply the filter
         const set_result = c.pcap_setfilter(self.handle, &program);
         if (set_result < 0) {
             const err_msg = c.pcap_geterr(self.handle);
@@ -254,7 +325,12 @@ pub const CaptureSession = struct {
         }
     }
     
-    // Capture a single packet and parse its info
+    /// Captures a single packet and parses it into a structured format
+    ///
+    /// Returns:
+    ///   - PacketInfo containing parsed packet data
+    ///   - null if timeout occurred with no packets available
+    ///   - Error if capture failed or packet parsing failed
     pub fn capturePacket(self: *CaptureSession) !?PacketInfo {
         var header: ?*c.struct_pcap_pkthdr = undefined;
         var packet: ?*const u8 = undefined;
@@ -262,17 +338,23 @@ pub const CaptureSession = struct {
         const res = c.pcap_next_ex(self.handle, &header, &packet);
         
         if (res <= 0) {
-            // Timeout or error
+            // timeout or error
             if (res < 0) {
                 return Error.PacketCaptureFailed;
             }
             return null;
         }
         
-        // Parse basic packet info (for IPv4 packets)
+        // parse basic packet info (for IPv4 packets)
         return parsePacketInfo((header.?).*, @as([*]const u8, @ptrCast(packet.?)));
     }
 
+    /// Captures a single raw packet without parsing
+    ///
+    /// Returns:
+    ///   - RawPacketData containing unparsed packet and header
+    ///   - null if timeout occurred with no packets available
+    ///   - Error if capture failed
     pub fn captureRawPacket(self: *CaptureSession) !?RawPacketData {
         var header: ?*c.struct_pcap_pkthdr = null;
         var packet_data: [*c]const u8 = null;
@@ -306,25 +388,30 @@ pub const CaptureSession = struct {
     }
 };
 
+/// ICMP header structure
 pub const IcmpHeader = extern struct {
-    type: u8,
-    code: u8,
-    checksum: u16, // Big Endian
-    rest_of_header: u32, // Big Endian, contents vary by type/code
+    type: u8, // ICMP message type
+    code: u8, // ICMP message code
+    checksum: u16, // checksum in network byte order
+    rest_of_header: u32, // remainder of header (varies by type/code)
 
+    /// Get the ICMP message type
     pub fn getType(self: IcmpHeader) u8 {
         return self.type;
     }
 
+    /// Get the ICMP message code
     pub fn getCode(self: IcmpHeader) u8 {
         return self.code;
     }
 
+    /// Get the checksum in host byte order
     pub fn getChecksum(self: IcmpHeader) u16 {
         const ptr = @as(*const [2]u8, @ptrCast(&self.checksum));
         return std.mem.readInt(u16, ptr, Endian.big);
     }
 
+    /// Get the identifier for echo request/reply messages
     pub fn getId(self: IcmpHeader) u16 {
         // for echo request/reply (types 0 and 8), first 2 bytes of rest_of_header is ID
         if (self.type == 0 or self.type == 8) {
@@ -334,6 +421,7 @@ pub const IcmpHeader = extern struct {
         return 0;
     }
 
+    /// Get the sequence number for echo request/reply messages
     pub fn getSeq(self: IcmpHeader) u16 {
         // for echo request/reply (types 0 and 8), last 2 bytes of rest_of_header is sequence
         if (self.type == 0 or self.type == 8) {
@@ -344,7 +432,16 @@ pub const IcmpHeader = extern struct {
     }
 };
 
-// Get a list of available network interfaces
+/// Get a list of all available network interfaces on the system
+///
+/// Parameters:
+///   allocator: Memory allocator for the returned interface list
+///
+/// Returns:
+///   Slice of Interface structs, caller owns the memory
+///
+/// Errors:
+///   NoDevicesFound if no interfaces are available or an error occurs
 pub fn getInterfaces(allocator: Allocator) ![]Interface {
     var err_buf: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
     var dev_list: [*c]c.pcap_if_t = undefined;
@@ -381,23 +478,36 @@ pub fn getInterfaces(allocator: Allocator) ![]Interface {
     return interface_list.toOwnedSlice();
 }
 
-// Helper function to parse packet info
+/// Parses raw packet data into a structured PacketInfo
+///
+/// This function handles the complexities of network protocol parsing,
+/// extracting headers and payload data from Ethernet, IP, TCP, UDP, and ICMP
+/// packets. It manages endianness conversions and provides a clean interface
+/// to packet metadata.
+///
+/// Parameters:
+///   header: pcap packet header with timing and size information
+///   packet_data: Raw packet bytes from the capture
+///
+/// Returns:
+///   Parsed PacketInfo or null if the packet is not of a supported type
+///   May return error if packet is malformed or truncated
 pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !?PacketInfo {
-    const caplen = header.caplen; // Use captured length for bounds checks
+    const caplen = header.caplen; // use captured length for bounds checks
 
-    // Check minimum length for Ethernet header
+    // check minimum length for Ethernet header
     if (caplen < @sizeOf(EthernetHeader)) return null;
 
-    // Use @ptrCast to view the start of packet_data as an EthernetHeader
+    // @ptrCast to view the start of packet_data as an EthernetHeader
     // WARNING: Assumes sufficient alignment from pcap.
     var eth_header_aligned: EthernetHeader = undefined;
     @memcpy(std.mem.asBytes(&eth_header_aligned), packet_data[0..@sizeOf(EthernetHeader)]);
     const eth_header = &eth_header_aligned;
 
-    // Check EtherType for IPv4
-    if (eth_header.etherType() != 0x0800) return null; // Not IPv4
+    // check EtherType for IPv4
+    if (eth_header.etherType() != 0x0800) return null; // not IPv4
 
-    // Check length for minimum IPv4 header
+    // check length for minimum IPv4 header
     const ip_offset = @sizeOf(EthernetHeader);
     if (caplen < ip_offset + @sizeOf(IpV4Header)) {
         log.debug("Packet too short for IPv4 header (caplen: {}, required: {})", 
@@ -409,10 +519,10 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
     @memcpy(std.mem.asBytes(&ip_header_aligned), packet_data[ip_offset..ip_offset+@sizeOf(IpV4Header)]);
     const ip_header = &ip_header_aligned;
 
-    // Validate IP header length field against captured length
+    // validate IP header length field against captured length
     const ip_hdr_len_bytes = ip_header.headerLength();
     if (ip_hdr_len_bytes < 20 or caplen < ip_offset + ip_hdr_len_bytes) {
-        // Invalid header length or packet too short for declared header length
+        // invalid header length or packet too short for declared header length
         log.debug("Invalid IP header length ({}) or insufficient captured data ({})", .{ ip_hdr_len_bytes, caplen });
         return Error.InvalidPacketHeader;
     }
@@ -424,16 +534,16 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
 
     const transport_offset = ip_offset + ip_hdr_len_bytes;
 
+    // parse transport layer based on IP protocol field
     switch (ip_header.protocol) {
         6 => { // TCP
             protocol_type = .TCP;
-            // Check length for minimum TCP header (fixed part)
+            // check length for minimum TCP header (fixed part)
             if (caplen >= transport_offset + @sizeOf(TcpHeader)) {
                 var tcp_header_aligned: TcpHeader = undefined;
                 @memcpy(std.mem.asBytes(&tcp_header_aligned), packet_data[transport_offset..transport_offset+@sizeOf(TcpHeader)]);
                 const tcp_header = &tcp_header_aligned;
 
-                // Optional: Validate TCP header length against captured length
                 const tcp_hdr_len_bytes = tcp_header.headerLength();
                 if (tcp_hdr_len_bytes < 20 or caplen < transport_offset + tcp_hdr_len_bytes) {
                     log.debug("Invalid TCP header length ({}) or insufficient captured data ({})", .{ tcp_hdr_len_bytes, caplen });
@@ -445,12 +555,12 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
                 transport_checksum = tcp_header.getChecksum();
             } else {
                 log.debug("Packet too short for TCP header (caplen: {}, required: {})", .{ caplen, transport_offset + @sizeOf(TcpHeader) });
-                return Error.InvalidPacketHeader; // Packet too short for fixed TCP header part
+                return Error.InvalidPacketHeader; // packet too short for fixed TCP header part
             }
         },
         17 => { // UDP
             protocol_type = .UDP;
-            // Check length for UDP header
+            // check length for UDP header
             if (caplen >= transport_offset + @sizeOf(UdpHeader)) {
                 var udp_header_aligned: UdpHeader = undefined;
                 @memcpy(std.mem.asBytes(&udp_header_aligned), packet_data[transport_offset..transport_offset+@sizeOf(UdpHeader)]);
@@ -466,7 +576,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         },
         1 => { // ICMP
             protocol_type = .ICMP;
-            // Parsing ICMP header fields
+            // parsing ICMP header fields
             if (caplen >= transport_offset + @sizeOf(IcmpHeader)) {
                 var icmp_header_aligned: IcmpHeader = undefined;
                 @memcpy(std.mem.asBytes(&icmp_header_aligned),
@@ -490,6 +600,7 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
         },
     }
 
+    // extract payload and protocol-specific flags
     var payload_offset: usize = 0;
     var payload_length: usize = 0;
     var tcp_flags: u8 = 0;
@@ -503,11 +614,13 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
                     packet_data[transport_offset..transport_offset+@sizeOf(TcpHeader)]);
                 const tcp_header = &tcp_header_aligned;
 
+                // calculate payload offset and length
                 payload_offset = transport_offset + tcp_header.headerLength();
                 if (payload_offset < caplen) {
                     payload_length = caplen - payload_offset;
                 }
-
+                
+                // extract TCP flags
                 if (tcp_header.flagFIN()) tcp_flags |= 0x01;
                 if (tcp_header.flagSYN()) tcp_flags |= 0x02;
                 if (tcp_header.flagRST()) tcp_flags |= 0x04;
@@ -516,11 +629,12 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
                 if (tcp_header.flagURG()) tcp_flags |= 0x20;
                 if (tcp_header.flagECE()) tcp_flags |= 0x40;
                 if (tcp_header.flagCWR()) tcp_flags |= 0x80;
-
+                
+                // extract IP flags from the IP header
                 const ip_flags_frag = std.mem.readInt(u16, std.mem.asBytes(&ip_header.flags_fragment_offset), Endian.big);
-                if ((ip_flags_frag & 0x4000) != 0) ip_flags |= 0x01; // Don't Fragment
-                if ((ip_flags_frag & 0x2000) != 0) ip_flags |= 0x02; // More Fragments
-                if ((ip_flags_frag & 0x1FFF) != 0) ip_flags |= 0x04; // Fragment Offset (if non-zero)
+                if ((ip_flags_frag & 0x4000) != 0) ip_flags |= 0x01; // don't fragment
+                if ((ip_flags_frag & 0x2000) != 0) ip_flags |= 0x02; // more fragments
+                if ((ip_flags_frag & 0x1FFF) != 0) ip_flags |= 0x04; // fragment offset (if non-zero)
             }
         },
         .UDP => {
@@ -563,8 +677,20 @@ pub fn parsePacketInfo(header: c.struct_pcap_pkthdr, packet_data: [*]const u8) !
     };
 }
 
+/// Expands shorthand filter expressions to full BPF syntax
+///
+/// This helper function makes it easier to use common filter patterns
+/// by allowing simple terms like "dns" or "http" instead of requiring
+/// the full BPF filter syntax.
+///
+/// Parameters:
+///   filter: Filter string to potentially expand
+///   allocator: Memory allocator for the returned string
+///
+/// Returns:
+///   The expanded filter expression (caller owns the memory)
 fn expandFilterExpression(filter: []const u8, allocator: Allocator) ![]const u8 {
-    // Common shorthands and their proper BPF expressions
+    // common shorthands and their proper BPF expressions
     if (std.mem.eql(u8, filter, "dns")) {
         return allocator.dupe(u8, "udp port 53 or tcp port 53");
     } else if (std.mem.eql(u8, filter, "http")) {
@@ -591,6 +717,6 @@ fn expandFilterExpression(filter: []const u8, allocator: Allocator) ![]const u8 
         return allocator.dupe(u8, "udp port 161");
     }
     
-    // If not a known shorthand, return the original filter
+    // if not a known shorthand, return the original filter
     return allocator.dupe(u8, filter);
 }

@@ -1,3 +1,16 @@
+///////////////////////////////////////////////////////////////////////////////
+// Inter-Process Communication Module
+//
+// This module provides reliable, bidirectional communication channels between
+// processes in the Necronet system. It implements multiple transport mechanisms
+// (standard I/O, named pipes, and TCP sockets) with platform-specific
+// optimizations for both Windows and Unix-based systems.
+//
+// The IPC system handles serialization, connection management, error handling,
+// and resource cleanup automatically. All operations are designed to be
+// non-blocking with configurable timeouts and retry policies.
+///////////////////////////////////////////////////////////////////////////////
+
 const std = @import("std");
 const os = std.os;
 const Allocator = std.mem.Allocator;
@@ -8,8 +21,10 @@ const ws2_32 = @cImport({
 });
 const builtin = @import("builtin");
 
+/// Windows-specific error code for when a pipe client is already connected
 const ERROR_PIPE_CONNECTED = 535; // 0x217 hex
 
+/// Windows API functions not directly exposed by Zig std lib
 extern "kernel32" fn ConnectNamedPipe(
     hNamedPipe: windows.HANDLE,
     lpOverlapped: ?*anyopaque,
@@ -26,20 +41,21 @@ const msg = @import("messages");
 const Message = msg.Message;
 
 /// Error types that can occur during IPC operations
+/// These provide specific failure reasons for better error handling and recovery
 pub const IPCError = error{
-    ChannelInitFailed,
-    SendFailed,
-    ReceiveFailed,
-    Disconnected,
-    InvalidMessage,
-    BufferTooSmall,
-    OperationTimedOut,
+    ChannelInitFailed, // failed to initialize the communication channel
+    SendFailed, // message transmission failed
+    ReceiveFailed, // message reception failed
+    Disconnected, // the channel has been closed or disconnected
+    InvalidMessage, // received message with invalid format
+    BufferTooSmall, // receive buffer is too small for incoming message
+    OperationTimedOut, // operation did not complete within timeout period
 };
 
 /// Message serialization format options
 pub const SerializationFormat = enum {
-    Json,
-    Binary,
+    Json, // JSON text format (human-readable, flexible)
+    Binary, // Binary format (compact, faster)
 };
 
 /// Options for how the IPC channel connects processes
@@ -50,9 +66,10 @@ pub const ChannelType = enum {
 };
 
 /// Configuration for IPC channel
+/// Controls behavior, performance characteristics, and error handling policy
 pub const IPCConfig = struct {
-    channel_type: ChannelType = .StdIO,
-    serialization: SerializationFormat = .Json,
+    channel_type: ChannelType = .StdIO, // communication transport mechanism
+    serialization: SerializationFormat = .Json, // message encoding format
     path: ?[]const u8 = null,         // Path for named pipe, or address for socket
     buffer_size: usize = 65536,       // Default read buffer size (64KB)
     timeout_ms: u32 = 5000,           // Default timeout in milliseconds
@@ -60,39 +77,52 @@ pub const IPCConfig = struct {
 };
 
 /// Statistics about IPC channel usage
+/// Tracks performance metrics and helps with debugging connection issues
 pub const ChannelStats = struct {
-    messages_sent: u64 = 0,
-    messages_received: u64 = 0,
-    bytes_sent: u64 = 0,
-    bytes_received: u64 = 0,
-    send_errors: u32 = 0,
-    receive_errors: u32 = 0,
-    last_activity: i64 = 0,           // Timestamp of last activity
+    messages_sent: u64 = 0, // total messages successfully sent
+    messages_received: u64 = 0, // total messages successfully received
+    bytes_sent: u64 = 0, // total bytes transmitted
+    bytes_received: u64 = 0, // total bytes received
+    send_errors: u32 = 0, // count of message send failures
+    receive_errors: u32 = 0, // count of message receive failure
+    last_activity: i64 = 0, // timestamp of last successful activity
 };
 
-/// IPC Channel for Slig communication
+/// IPC Channel for Necronet communication
+/// Provides a reliable, bidirectional message-passing interface
 pub const IPCChannel = struct {
-    allocator: Allocator,
-    config: IPCConfig,
-    stats: ChannelStats = .{},
-    is_connected: bool = false,
-    next_sequence: u64 = 1,
-    read_buffer: []u8 = &[_]u8{},
+    allocator: Allocator, // memory allocator for dynamic allocations
+    config: IPCConfig, // channel configuration parameters
+    stats: ChannelStats = .{}, // usage statistics and metrics
+    is_connected: bool = false, // whether channel is currently operational
+    next_sequence: u64 = 1, // auto-incrementing message sequence number
+    read_buffer: []u8 = &[_]u8{}, // buffer for receiving messages
     
     // File descriptors/handles for I/O
-    read_fd: ?std.fs.File = null,
-    write_fd: ?std.fs.File = null,
+    read_fd: ?std.fs.File = null, // file descriptor for reading
+    write_fd: ?std.fs.File = null, // file descriptor for writing
 
-    socket: ?std.net.Stream = null,
+    socket: ?std.net.Stream = null, // TCP socket for network-based IPC
 
+    // stream readers and writers for socket-based communication
     socket_reader: ?std.io.Reader(std.net.Stream, std.net.Stream.ReadError, std.net.Stream.read) = null,
     socket_writer: ?std.io.Writer(std.net.Stream, std.net.Stream.WriteError, std.net.Stream.write) = null,
     
-    // Reader/writer
+    // stream readers and writers for file-based communication
     reader: ?std.io.Reader(std.fs.File, std.fs.File.ReadError, std.fs.File.read) = null,
     writer: ?std.io.Writer(std.fs.File, std.fs.File.WriteError, std.fs.File.write) = null,
     
     /// Initialize a new IPC channel
+    ///
+    /// Creates and configures a communication channel based on the provided configuration.
+    /// Handles platform-specific setup for each channel type and allocates required resources.
+    ///
+    /// Parameters:
+    ///   allocator: Memory allocator for channel resources
+    ///   config: IPC channel configuration parameters
+    ///
+    /// Returns:
+    ///   Pointer to initialized IPC channel or error
     pub fn init(allocator: Allocator, config: IPCConfig) !*IPCChannel {
         var channel = try allocator.create(IPCChannel);
         errdefer allocator.destroy(channel);
@@ -102,18 +132,18 @@ pub const IPCChannel = struct {
             .config = config,
         };
         
-        // Allocate read buffer
+        // allocate read buffer
         channel.read_buffer = try allocator.alloc(u8, config.buffer_size);
         errdefer allocator.free(channel.read_buffer);
         
-        // Initialize channel based on the selected type
+        // initialize channel based on the selected type
         switch (config.channel_type) {
             .StdIO => try channel.initStdIO(),
             .NamedPipe => try channel.initNamedPipe(),
             .Socket => try channel.initSocket(),
         }
         
-        // Initialize the reader/writer
+        // initialize the reader/writer
         if (channel.read_fd != null) {
             channel.reader = channel.read_fd.?.reader();
         }
@@ -136,6 +166,12 @@ pub const IPCChannel = struct {
     }
     
     /// Initialize using standard input/output
+    ///
+    /// Sets up a communication channel using the process stdin/stdout streams.
+    /// This is useful for parent-child process communication without extra setup.
+    ///
+    /// Returns:
+    ///   Error if initialization fails
     fn initStdIO(self: *IPCChannel) !void {
         // For StdIO, we'll use the current process's stdin/stdout
         // Child processes will use these to communicate with parent
@@ -152,6 +188,13 @@ pub const IPCChannel = struct {
     }
     
     /// Initialize using named pipes (Windows) or FIFOs (Unix)
+    ///
+    /// Creates and configures platform-specific named pipe implementations.
+    /// On Windows, uses Win32 named pipe API with message-based mode.
+    /// On Unix systems, creates bidirectional FIFOs with non-blocking mode.
+    ///
+    /// Returns:
+    ///   Error if pipe creation or configuration fails
     fn initNamedPipe(self: *IPCChannel) !void {
         if (self.config.path == null) {
             return IPCError.ChannelInitFailed;
@@ -160,7 +203,7 @@ pub const IPCChannel = struct {
         const pipe_path = self.config.path.?;
         
         if (builtin.os.tag == .windows) {
-            // Windows named pipes with full production robustness
+            // Windows named pipes
             const pipe_name = try std.fmt.allocPrint(
                 self.allocator,
                 "\\\\.\\pipe\\{s}",
@@ -186,7 +229,7 @@ pub const IPCChannel = struct {
             const OPEN_EXISTING = 3;
             const FILE_ATTRIBUTE_NORMAL = 0x00000080;
 
-            // Create write pipe (server mode)
+            // create write pipe (server mode)
             const write_handle = windows.kernel32.CreateNamedPipeW(
                 try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, pipe_name),
                 PIPE_ACCESS_DUPLEX,
@@ -202,7 +245,7 @@ pub const IPCChannel = struct {
                 return IPCError.ChannelInitFailed;
             }
 
-            // Connect to read pipe (client mode)
+            // connect to read pipe (client mode)
             const read_handle = windows.kernel32.CreateFileW(
                 std.unicode.utf8ToUtf16LeAllocZ(self.allocator, read_pipe_name) catch {
                     windows.CloseHandle(write_handle);
@@ -221,7 +264,7 @@ pub const IPCChannel = struct {
                 return IPCError.ChannelInitFailed;
             }
 
-            // Wait for client connection
+            // wait for client connection
             if (ConnectNamedPipe(write_handle, null) == 0) {
                 const last_error = windows.GetLastError();
                 if (@intFromEnum(last_error) != ERROR_PIPE_CONNECTED) {
@@ -231,11 +274,11 @@ pub const IPCChannel = struct {
                 }
             }
 
-            // Convert to std.fs.File
+            // convert to std.fs.File
             self.write_fd = std.fs.File{ .handle = write_handle };
             self.read_fd = std.fs.File{ .handle = read_handle };
 
-            // Set pipe read mode to message
+            // set pipe read mode to message
             var pipe_mode: u32 = PIPE_READMODE_MESSAGE;
             if (SetNamedPipeHandleState(
                 read_handle,
@@ -262,25 +305,25 @@ pub const IPCChannel = struct {
             );
             defer self.allocator.free(write_path);
 
-            // Create both read and write FIFOs
+            // create both read and write FIFOs
             const S_IRUSR = 0o400;  // Read permission, owner
             const S_IWUSR = 0o200;  // Write permission, owner
 
-            // Create read FIFO
+            // create read FIFO
             _ = os.mkfifo(read_path.ptr, S_IRUSR | S_IWUSR) catch |err| {
                 if (err != error.PathAlreadyExists) {
                     return IPCError.ChannelInitFailed;
                 }
             };
 
-            // Create write FIFO
+            // create write FIFO
             _ = os.mkfifo(write_path.ptr, S_IRUSR | S_IWUSR) catch |err| {
                 if (err != error.PathAlreadyExists) {
                     return IPCError.ChannelInitFailed;
                 }
             };
 
-            // Open both FIFOs with proper permissions
+            // open both FIFOs with proper permissions
             self.read_fd = try std.fs.openFileAbsolute(read_path, .{
                 .read = true,
                 .write = false,
@@ -293,29 +336,36 @@ pub const IPCChannel = struct {
                 .mode = .write_only,
             });
 
-            // Set non-blocking mode to avoid deadlocks
+            // set non-blocking mode to avoid deadlocks
             try self.read_fd.?.setNonBlocking(true);
         }
     }
     
     /// Initialize using TCP socket with proper hostname resolution and IPv6 support
+    ///
+    /// Creates a TCP socket connection with configurable performance options.
+    /// Handles both IPv4 and IPv6 with automatic hostname resolution.
+    /// Configures socket for optimal IPC performance (TCP_NODELAY, TCP_KEEPALIVE).
+    ///
+    /// Returns:
+    ///   Error if connection fails or socket configuration fails
     fn initSocket(self: *IPCChannel) !void {
         if (self.config.path == null) {
             return IPCError.ChannelInitFailed;
         }
         
-        // Parse the address and port from path
+        // parse the address and port from path
         const addr_str = self.config.path.?;
         
-        // Split address:port format
+        // split address:port format
         var split_iter = std.mem.splitScalar(u8, addr_str, ':');
         const hostname = split_iter.next() orelse return IPCError.ChannelInitFailed;
         const port_str = split_iter.next() orelse "8080"; // Default port if not specified
         
-        // Parse port
+        // parse port
         const port = try std.fmt.parseInt(u16, port_str, 10);
         
-        // Connect with full hostname resolution (handles both IPv4 and IPv6)
+        // connect with full hostname resolution (handles both IPv4 and IPv6)
         const server = try std.net.tcpConnectToHost(self.allocator, hostname, port);
         
         const sock_handle = server.handle;
@@ -362,6 +412,15 @@ pub const IPCChannel = struct {
     }
     
     /// Send a message through the IPC channel
+    ///
+    /// Serializes and transmits a message according to the configured format.
+    /// Updates statistics and handles platform-specific transmission details.
+    ///
+    /// Parameters:
+    ///   message: Message to send
+    ///
+    /// Returns:
+    ///   Error if serialization or transmission fails
     pub fn sendMessage(self: *IPCChannel, message: *const Message) !void {
         if (!self.is_connected or self.writer == null) {
             return IPCError.Disconnected;
@@ -374,7 +433,7 @@ pub const IPCChannel = struct {
             return IPCError.Disconnected;
         }
         
-        // Update timestamp to now
+        // update timestamp to now
         const local_message = Message{
             .header = msg.MessageHeader{
                 .version = message.header.version,
@@ -386,7 +445,7 @@ pub const IPCChannel = struct {
             .payload = message.payload,
         };
 
-        // Serialize the message based on the configured format
+        // serialize the message based on the configured format
         var bytes: []u8 = undefined;
         defer self.allocator.free(bytes);
         
@@ -394,14 +453,14 @@ pub const IPCChannel = struct {
             .Json => {
                 bytes = try msg.toJson(&local_message, self.allocator);
                 
-                // For JSON, prepend the message length as a 4-byte integer
+                // for JSON, prepend the message length as a 4-byte integer
                 var length_prefix = try self.allocator.alloc(u8, 4 + bytes.len);
                 defer self.allocator.free(length_prefix);
                 
                 std.mem.writeInt(u32, length_prefix[0..4], @intCast(bytes.len), .little);
                 @memcpy(length_prefix[4..][0..bytes.len], bytes);
                 
-                // Write to the channel
+                // write to the channel
                 if (use_socket) {
                     _ = try self.socket_writer.?.writeAll(length_prefix);
                 } else {
@@ -411,7 +470,7 @@ pub const IPCChannel = struct {
             .Binary => {
                 bytes = try msg.toBinary(message, self.allocator);
                 
-                // Write directly to the channel
+                // write directly to the channel
                 if (use_socket) {
                     _ = try self.socket_writer.?.writeAll(bytes);
                 } else {
@@ -420,13 +479,20 @@ pub const IPCChannel = struct {
             },
         }
         
-        // Update statistics
+        // update statistics
         self.stats.messages_sent += 1;
         self.stats.bytes_sent += bytes.len;
         self.stats.last_activity = std.time.timestamp();
     }
     
     /// Receive a message from the IPC channel
+    ///
+    /// Reads and parses an incoming message according to the configured format.
+    /// Handles partial reads and platform-specific reception details.
+    /// Non-blocking behavior - returns null if no message is available.
+    ///
+    /// Returns:
+    ///   Parsed message if available, null if no message ready, or error
     pub fn receiveMessage(self: *IPCChannel) !?Message {
         if (!self.is_connected or self.reader == null) {
             return IPCError.Disconnected;
@@ -439,10 +505,10 @@ pub const IPCChannel = struct {
             return IPCError.Disconnected;
         }
         
-        // Read based on the configured serialization format
+        // read based on the configured serialization format
         switch (self.config.serialization) {
             .Json => {
-                // First read the 4-byte length prefix
+                // first read the 4-byte length prefix
                 var length_buf: [4]u8 = undefined;
                 const bytes_read = if (use_socket) 
                     self.socket_reader.?.read(&length_buf) catch |err| {
@@ -460,10 +526,10 @@ pub const IPCChannel = struct {
                     return IPCError.ReceiveFailed;
                 }
                 
-                // Parse the length
+                // parse the length
                 const msg_len = std.mem.readInt(u32, &length_buf, .little);
                 
-                // Ensure our buffer is large enough
+                // ensure our buffer is large enough
                 if (msg_len > self.read_buffer.len) {
                     return IPCError.BufferTooSmall;
                 }
@@ -489,19 +555,19 @@ pub const IPCChannel = struct {
                     return IPCError.ReceiveFailed;
                 }
                 
-                // Parse the JSON
+                // parse the JSON
                 const json_data = self.read_buffer[0..json_bytes_read];
                 const result = try msg.fromJson(json_data, self.allocator);
                 
-                // Update statistics
+                // update statistics
                 self.stats.messages_received += 1;
-                self.stats.bytes_received += json_bytes_read + 4; // Include length prefix
+                self.stats.bytes_received += json_bytes_read + 4; // include length prefix
                 self.stats.last_activity = std.time.timestamp();
                 
                 return result;
             },
             .Binary => {
-                // For binary format, we need a fixed-size header first
+                // for binary format, we need a fixed-size header first
                 const header_size = @sizeOf(msg.MessageHeader);
                 const header_bytes_read = if (use_socket)
                     self.socket_reader.?.read(self.read_buffer[0..header_size]) catch |err| {
@@ -519,17 +585,17 @@ pub const IPCChannel = struct {
                     return IPCError.ReceiveFailed;
                 }
                 
-                // Parse the header
+                // parse the header
                 const header = @as(*const msg.MessageHeader, @ptrCast(@alignCast(&self.read_buffer[0])));
                 
-                // Calculate total message size based on header
+                // calculate total message size based on header
                 const total_size = header_size + header.payload_size;
                 
                 if (total_size > self.read_buffer.len) {
                     return IPCError.BufferTooSmall;
                 }
                 
-                // Read the rest of the message
+                // read the rest of the message
                 const body_size = total_size - header_size;
                 var total_read: usize = 0;
                 while (total_read < body_size) {
@@ -551,11 +617,11 @@ pub const IPCChannel = struct {
                     return IPCError.ReceiveFailed;
                 }
                 
-                // Parse the binary message
+                // parse the binary message
                 const message_data = self.read_buffer[0..total_size];
                 const result = try msg.fromBinary(message_data, self.allocator);
                 
-                // Update statistics
+                // update statistics
                 self.stats.messages_received += 1;
                 self.stats.bytes_received += total_size;
                 self.stats.last_activity = std.time.timestamp();
@@ -566,12 +632,28 @@ pub const IPCChannel = struct {
     }
     
     /// Send a message and wait for a response
+    ///
+    /// Convenience method for request-response patterns
+    ///
+    /// Parameters:
+    ///   message: Message to send
+    ///
+    /// Returns:
+    ///   Response message or error
     pub fn sendAndReceive(self: *IPCChannel, message: *const Message) !?Message {
         try self.sendMessage(message);
         return try self.receiveMessage();
     }
     
     /// Create and send a packet event
+    ///
+    /// Convenience method that handles message creation and sequence numbering
+    ///
+    /// Parameters:
+    ///   event: Packet event data
+    ///
+    /// Returns:
+    ///   Error if message creation or sending fails
     pub fn sendPacketEvent(self: *IPCChannel, event: msg.PacketEvent) !void {
         const message = msg.createPacketEventMsg(self.next_sequence, event);
         self.next_sequence += 1;
@@ -579,6 +661,14 @@ pub const IPCChannel = struct {
     }
     
     /// Create and send a Slig alert
+    ///
+    /// Convenience method that handles message creation and sequence numbering
+    ///
+    /// Parameters:
+    ///   alert: Alert data
+    ///
+    /// Returns:
+    ///   Error if message creation or sending fails
     pub fn sendSligAlert(self: *IPCChannel, alert: msg.SligAlert) !void {
         const message = msg.createSligAlertMsg(self.next_sequence, alert);
         self.next_sequence += 1;
@@ -586,6 +676,14 @@ pub const IPCChannel = struct {
     }
     
     /// Create and send a flow update
+    ///
+    /// Convenience method that handles message creation and sequence numbering
+    ///
+    /// Parameters:
+    ///   flow: Flow update data
+    ///
+    /// Returns:
+    ///   Error if message creation or sending fails
     pub fn sendFlowUpdate(self: *IPCChannel, flow: msg.FlowUpdate) !void {
         const message = msg.createFlowUpdateMsg(self.next_sequence, flow);
         self.next_sequence += 1;
@@ -593,8 +691,10 @@ pub const IPCChannel = struct {
     }
     
     /// Close the IPC channel and free resources
+    ///
+    /// Properly cleans up all resources and handles platform-specific cleanup
     pub fn deinit(self: *IPCChannel) void {
-        // Close file descriptors if open
+        // close file descriptors if open
         if (self.read_fd) |fd| {
             fd.close();
         }
@@ -609,7 +709,7 @@ pub const IPCChannel = struct {
             }
         }
         
-        // Free the read buffer
+        // free the read buffer
         if (self.read_buffer.len > 0) {
             self.allocator.free(self.read_buffer);
         }
@@ -618,22 +718,33 @@ pub const IPCChannel = struct {
             socket.close();
         }
         
-        // Destroy the channel itself
+        // destroy the channel itself
         self.allocator.destroy(self);
     }
     
     /// Get the current channel statistics
+    ///
+    /// Provides metrics about channel usage for monitoring and debugging
+    ///
+    /// Returns:
+    ///   Current statistics snapshot
     pub fn getStats(self: *const IPCChannel) ChannelStats {
         return self.stats;
     }
     
     /// Check if the channel is connected and active
+    ///
+    /// A channel is considered inactive if no messages have been
+    /// sent or received within the last 30 seconds
+    ///
+    /// Returns:
+    ///   true if channel is connected and recently active
     pub fn isActive(self: *const IPCChannel) bool {
         if (!self.is_connected) {
             return false;
         }
         
-        // Consider inactive if no activity for 30 seconds
+        // consider inactive if no activity for 30 seconds
         const now = std.time.timestamp();
         const inactivity_period = now - self.stats.last_activity;
         const MAX_INACTIVITY_SEC = 30;
@@ -644,12 +755,20 @@ pub const IPCChannel = struct {
 
 /// High-level IPC server that handles multiple client connections
 pub const IPCServer = struct {
-    allocator: Allocator,
-    clients: std.ArrayList(*IPCChannel),
-    is_running: bool = false,
-    server_thread: ?Thread = null,
+    allocator: Allocator, // memory allocator for server resources
+    clients: std.ArrayList(*IPCChannel), // list of connected client channels
+    is_running: bool = false, // whether server is actively accepting connections
+    server_thread: ?Thread = null, // thread handling incoming connections
     
     /// Initialize a new IPC server
+    ///
+    /// Creates a server instance that can handle multiple client connections
+    ///
+    /// Parameters:
+    ///   allocator: Memory allocator for server resources
+    ///
+    /// Returns:
+    ///   Pointer to initialized server or error
     pub fn init(allocator: Allocator) !*IPCServer {
         const server = try allocator.create(IPCServer);
         server.* = IPCServer{
@@ -660,43 +779,62 @@ pub const IPCServer = struct {
     }
     
     /// Add a client connection to the server
+    ///
+    /// Registers a new client channel with the server for message broadcasting
+    ///
+    /// Parameters:
+    ///   client: Client channel to add
+    ///
+    /// Returns:
+    ///   Error if adding client fails
     pub fn addClient(self: *IPCServer, client: *IPCChannel) !void {
         try self.clients.append(client);
     }
     
     /// Broadcast a message to all connected clients
+    ///
+    /// Sends the same message to all active clients, automatically
+    /// handling disconnected clients through garbage collection
+    ///
+    /// Parameters:
+    ///   message: Message to broadcast to all clients
+    ///
+    /// Returns:
+    ///   Error if broadcast fails (individual client failures are logged but not fatal)
     pub fn broadcast(self: *IPCServer, message: *const Message) !void {
-        // Remove disconnected clients first
+        // remove disconnected clients first
         var i: usize = 0;
         while (i < self.clients.items.len) {
             if (!self.clients.items[i].isActive()) {
                 const client = self.clients.items[i];
                 _ = self.clients.swapRemove(i);
-                client.deinit(); // Clean up the client
+                client.deinit(); // clean up the client
             } else {
                 i += 1;
             }
         }
         
-        // Send to all remaining clients
+        // send to all remaining clients
         for (self.clients.items) |client| {
             client.sendMessage(message) catch |err| {
                 std.log.err("Failed to send message to client: {}", .{err});
-                // Continue sending to other clients
+                // continue sending to other clients
             };
         }
     }
     
     /// Clean up all resources associated with the server
+    ///
+    /// Stops the server thread and closes all client connections
     pub fn deinit(self: *IPCServer) void {
         self.is_running = false;
         
-        // Wait for server thread to terminate if it exists
+        // wait for server thread to terminate if it exists
         if (self.server_thread) |thread| {
             thread.join();
         }
         
-        // Close all client connections
+        // close all client connections
         for (self.clients.items) |client| {
             client.deinit();
         }
@@ -707,6 +845,11 @@ pub const IPCServer = struct {
 };
 
 /// Create a default IPC configuration suitable for most use cases
+///
+/// Returns a configuration using StdIO and JSON serialization
+///
+/// Returns:
+///   Default configuration instance
 pub fn createDefaultConfig() IPCConfig {
     return IPCConfig{
         .channel_type = .StdIO,
@@ -716,6 +859,16 @@ pub fn createDefaultConfig() IPCConfig {
 }
 
 /// Create a named pipe configuration with custom settings
+///
+/// Helper function for creating a named pipe configuration
+/// with specified path and serialization format
+///
+/// Parameters:
+///   pipe_path: Path or name for the named pipe
+///   serialization: Serialization format to use
+///
+/// Returns:
+///   Configured named pipe IPC configuration
 pub fn createNamedPipeConfig(pipe_path: []const u8, serialization: SerializationFormat) IPCConfig {
     return IPCConfig{
         .channel_type = .NamedPipe,

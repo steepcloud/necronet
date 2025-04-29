@@ -1,12 +1,26 @@
+///////////////////////////////////////////////////////////////////////////////
+// Necronet Messaging Protocol
+//
+// This module defines the inter-process communication (IPC) message structures 
+// and serialization routines used for communication between the Necronet 
+// backend (Slig Barracks) and frontend (Mudokon Command) components.
+//
+// The messaging protocol is versioned, with strong validation and includes
+// support for both binary and JSON serialization formats. All messages follow
+// a consistent header-payload structure for reliable parsing and routing.
+///////////////////////////////////////////////////////////////////////////////
+
 const std = @import("std");
 const common = @import("common");
 const detection = @import("detection");
 const capture = @import("backend");
 
 /// Necronet IPC Protocol Version
+/// Used to ensure compatibility between components
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Message types exchanged between Slig Barracks (backend) and Mudokon Command (UI)
+/// Provides a complete taxonomy of all possible message categories in the system
 pub const MessageType = enum(u8) {
     // System messages
     Hello, // Initial connection handshake
@@ -27,6 +41,7 @@ pub const MessageType = enum(u8) {
 };
 
 /// Header included with every IPC message
+/// Provides routing, sequencing and size information for reliable transport
 pub const MessageHeader = struct {
     version: u16 = PROTOCOL_VERSION, // Protocol version
     sequence: u64, // Message sequence number
@@ -36,6 +51,7 @@ pub const MessageHeader = struct {
 };
 
 /// Minimal packet info for UI visualization
+/// Contains essential network metadata for display and analysis
 pub const PacketEvent = struct {
     flow_id: u64, // ID to group related packets
     timestamp: i64, // Precise timestamp (microseconds)
@@ -46,9 +62,10 @@ pub const PacketEvent = struct {
     dest_port: u16, // Destination port
     packet_size: u32, // Original packet size
     flags: PacketFlags, // Relevant protocol flags
-    payload: ?[]const u8 = null, // optional packet payload
+    payload: ?[]const u8 = null, // Optional packet payload
 
     /// TCP/IP flags and metadata
+    /// Compressed representation of important protocol flags
     pub const PacketFlags = packed struct {
         syn: bool = false, // TCP SYN flag
         ack: bool = false, // TCP ACK flag
@@ -63,6 +80,7 @@ pub const PacketEvent = struct {
 };
 
 /// Flow statistics for visualization as "pipes" in UI
+/// Aggregated metrics for network connections over time
 pub const FlowUpdate = struct {
     flow_id: u64, // Unique flow identifier
     protocol: common.Protocol, // Protocol identifier
@@ -79,17 +97,19 @@ pub const FlowUpdate = struct {
     last_update: i64, // Last updated timestamp
 
     /// Connection flow states
+    /// Provides a high-level view of connection health and status
     pub const FlowState = enum(u8) {
-        Unknown,
-        Established,
-        Terminated,
-        Blocked,
-        Suspicious, // Marked for closer inspection
-        Contaminated, // Confirmed malicious
+        Unknown, // state cannot be determined
+        Established, // connection is active and normal
+        Terminated, // connection has been closed properly
+        Blocked, // connection was blocked by security policy
+        Suspicious, // marked for closer inspection
+        Contaminated, // confirmed malicious
     };
 };
 
 /// Alert event ("Slig Alert") for threats/anomalies
+/// Comprehensive security incident information for analysis and response
 pub const SligAlert = struct {
     alert_id: u64, // Unique alert identifier
     timestamp: i64, // Detection timestamp
@@ -106,6 +126,7 @@ pub const SligAlert = struct {
     evidence: ?[]const u8, // Optional evidence data
 
     /// Free any allocated memory in the alert
+    /// Prevents memory leaks by properly releasing all dynamic allocations
     pub fn deinit(self: *SligAlert, allocator: std.mem.Allocator) void {
         if (self.category.len > 0) allocator.free(self.category);
         if (self.message.len > 0) allocator.free(self.message);
@@ -113,6 +134,7 @@ pub const SligAlert = struct {
     }
 
     /// Create a SligAlert from a detection.Alert
+    /// Converts internal alert representation to IPC-compatible format
     pub fn fromDetectionAlert(alert: detection.Alert, allocator: std.mem.Allocator) !SligAlert {
         var slig_alert = SligAlert{
             .alert_id = alert.id,
@@ -139,6 +161,7 @@ pub const SligAlert = struct {
 };
 
 /// Detection engine statistics
+/// Performance metrics and status information for the detection subsystem
 pub const DetectionStats = struct {
     uptime_seconds: u64, // Engine uptime
     packets_analyzed: u64, // Total packets analyzed
@@ -148,6 +171,8 @@ pub const DetectionStats = struct {
     memory_usage_kb: u64, // Memory usage in KB
     slig_status: SligStatus, // Status of detection "Sligs"
 
+    /// Operational status of the detection system
+    /// Indicates the current detection posture and capability
     pub const SligStatus = enum(u8) {
         Sleeping, // Idle, minimal analysis
         Patrolling, // Normal operation
@@ -157,12 +182,15 @@ pub const DetectionStats = struct {
 };
 
 /// Error information
+/// Structured error details for robust error handling across process boundaries
 pub const ErrorInfo = struct {
     code: ErrorCode, // Error classification
     component: []const u8, // Component that generated error
     message: []const u8, // Error description
     recoverable: bool, // Whether system can continue
 
+    /// Categorized error codes
+    /// Standardized error taxonomy for consistent handling
     pub const ErrorCode = enum(u16) {
         Unknown = 0,
 
@@ -185,53 +213,64 @@ pub const ErrorInfo = struct {
         SystemResourceExhausted = 901,
     };
 
+    /// Free allocated error resources
+    /// Ensures proper cleanup of dynamic memory in error messages
     pub fn deinit(self: *ErrorInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.component);
         allocator.free(self.message);
     }
 };
 
+/// Initial handshake message payload
 pub const HelloPayload = struct {
-    client_version: u16,
-    client_name: []const u8,
-    capabilities: u32,
+    client_version: u16, // client software version
+    client_name: []const u8, // client identifier
+    capabilities: u32, // bitfield of supported features
 };
 
+/// Periodic keep-alive message payload
 pub const HeartbeatPayload = struct {
-    uptime_seconds: u64,
+    uptime_seconds: u64, // time since component initialization
 };
 
+/// Graceful termination message payload
 pub const ShutdownPayload = struct {
-    reason: []const u8,
-    restart: bool = false,
+    reason: []const u8, // human-readable shutdown reason
+    restart: bool = false, // whether to restart after shutdown
 };
 
+/// Configuration update message payload
 pub const ConfigUpdatePayload = struct {
-    config_path: ?[]const u8 = null,
-    config_json: ?[]const u8 = null,
+    config_path: ?[]const u8 = null, // path to configuration file
+    config_json: ?[]const u8 = null, // direct configuration content
 };
 
+/// Capture engine control message payload
 pub const CaptureControlPayload = struct {
+    /// Operation to perform on the capture engine
     command: enum(u8) {
-        Start,
-        Stop,
-        Pause,
-        Resume,
+        Start, // begin packet capture
+        Stop, // end packet capture
+        Pause, // temporarily suspend capture
+        Resume, // continue suspended capture
     },
-    device_name: ?[]const u8 = null,
+    device_name: ?[]const u8 = null, // specific capture device to control
 };
 
+/// Capture filter update message payload
 pub const FilterUpdatePayload = struct {
-    filter_expression: []const u8,
-    apply_immediately: bool = true,
+    filter_expression: []const u8, // Berkeley Packet Filter expression
+    apply_immediately: bool = true, // whether to apply without waiting
 };
 
 /// Top-level wrapper for all IPC messages
+/// Provides a unified container for all message types with common header
 pub const Message = struct {
     header: MessageHeader,
     payload: Payload,
 
     /// Tagged union of all possible message payloads
+    /// Uses the message type as discriminant for type safety
     pub const Payload = union(MessageType) {
         Hello: HelloPayload,
         Heartbeat: HeartbeatPayload,
@@ -247,6 +286,7 @@ pub const Message = struct {
     };
 
     /// Free memory associated with this message
+    /// Properly cleans up all dynamically allocated fields based on message type
     pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
         switch (self.payload) {
             .Hello => |p| allocator.free(p.client_name),
@@ -261,7 +301,7 @@ pub const Message = struct {
                 if (p.device_name) |name| allocator.free(name);
             },
             .FilterUpdate => |p| allocator.free(p.filter_expression),
-            else => {}, // No allocation needed for other message types
+            else => {}, // no allocation needed for other message types
         }
     }
 };
@@ -269,6 +309,7 @@ pub const Message = struct {
 // Factory functions for creating common message types
 
 /// Create a packet event message
+/// Constructs a properly formatted PacketEvent message with appropriate timestamps
 pub fn createPacketEventMsg(sequence: u64, event: PacketEvent) Message {
     return Message{
         .header = MessageHeader{
@@ -282,6 +323,7 @@ pub fn createPacketEventMsg(sequence: u64, event: PacketEvent) Message {
 }
 
 /// Create a Slig Alert message
+/// Constructs a properly formatted security alert with deep copies of strings
 pub fn createSligAlertMsg(sequence: u64, alert: SligAlert, allocator: std.mem.Allocator) !Message {
     const category_copy = try allocator.dupe(u8, alert.category);
     errdefer allocator.free(category_copy);
@@ -335,6 +377,7 @@ pub fn createSligAlertMsg(sequence: u64, alert: SligAlert, allocator: std.mem.Al
 }
 
 /// Create a flow update message
+/// Constructs a properly formatted network flow update message
 pub fn createFlowUpdateMsg(sequence: u64, flow: FlowUpdate) Message {
     return Message{
         .header = MessageHeader{
@@ -348,6 +391,7 @@ pub fn createFlowUpdateMsg(sequence: u64, flow: FlowUpdate) Message {
 }
 
 /// Create an error message
+/// Constructs a properly formatted error notification with appropriate size calculation
 pub fn createErrorMsg(sequence: u64, err: ErrorInfo) Message {
     return Message{
         .header = MessageHeader{
@@ -381,32 +425,32 @@ pub fn createErrorMsg(sequence: u64, err: ErrorInfo) Message {
 pub fn packetEventFromCaptureInfo(packet: *const capture.PacketInfo, flow_id: u64) PacketEvent {
     var flags = PacketEvent.PacketFlags{};
 
-    // Extract TCP flags if we have a TCP packet with payload
+    // extract TCP flags if we have a TCP packet with payload
     if (packet.protocol == .TCP and packet.payload != null) {
         const payload = packet.payload.?;
 
-        // First verify we have an IP header (minimum 20 bytes)
+        // first verify we have an IP header (minimum 20 bytes)
         if (payload.len >= 20) {
-            // Get IP header version and length
+            // get IP header version and length
             const version_ihl = payload[0];
             const version = version_ihl >> 4;
 
-            // Only proceed if this is IPv4
+            // only proceed if this is IPv4
             if (version == 4) {
-                // Calculate IP header length (IHL is in 4-byte units)
+                // calculate IP header length (IHL is in 4-byte units)
                 const ihl = version_ihl & 0x0F;
                 const ip_header_len = ihl * 4;
 
-                // Verify IP header length is valid and we have enough data
+                // verify IP header length is valid and we have enough data
                 if (ihl >= 5 and payload.len >= ip_header_len) {
-                    // Extract fragmentation info from IP header
+                    // extract fragmentation info from IP header
                     const frag_info = std.mem.readInt(u16, payload[6..8], .big);
                     flags.fragmented = (frag_info & 0x1FFF) != 0; // Check offset or MF flag
 
-                    // Calculate TCP header offset and verify we have enough data
+                    // calculate TCP header offset and verify we have enough data
                     const tcp_offset = ip_header_len;
                     if (payload.len >= tcp_offset + 14) { // TCP header is at least 20 bytes, but safely check first 14
-                        // Extract TCP flags (flags are at offset 13 in TCP header)
+                        // extract TCP flags (flags are at offset 13 in TCP header)
                         const tcp_flags = payload[tcp_offset + 13];
 
                         flags.fin = (tcp_flags & 0x01) != 0; // FIN
@@ -435,8 +479,18 @@ pub fn packetEventFromCaptureInfo(packet: *const capture.PacketInfo, flow_id: u6
 }
 
 /// Serialize a Message to JSON
+///
+/// Converts a Message structure to a JSON string representation using the standard
+/// library JSON serializer. Includes proper indentation for better human readability.
+///
+/// Parameters:
+///   self: Pointer to the message to serialize
+///   allocator: Memory allocator for the resulting JSON string
+///
+/// Returns:
+///   Allocated string containing the JSON representation of the message
+///   Caller takes ownership of the returned memory
 pub fn toJson(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
-    // Use a JSON writer with proper formatting options
     var string = std.ArrayList(u8).init(allocator);
     errdefer string.deinit();
 
@@ -448,14 +502,23 @@ pub fn toJson(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
 }
 
 /// Deserialize a Message from JSON
+///
+/// Parses a JSON string into a properly structured Message object.
+/// Creates deep copies of all string fields to ensure proper memory ownership.
+///
+/// Parameters:
+///   json_str: JSON string representation of a Message
+///   allocator: Memory allocator for the resulting Message and its contents
+///
+/// Returns:
+///   Fully populated Message structure with independent memory ownership
+///   Caller takes ownership of the returned Message and must call deinit()
 pub fn fromJson(json_str: []const u8, allocator: std.mem.Allocator) !Message {
     var parsed = try std.json.parseFromSlice(Message, allocator, json_str, .{});
     defer parsed.deinit();
 
-    // Create owned copies of string slices for proper memory management
     var result = parsed.value;
 
-    // Handle string duplication for each message type with string fields
     switch (result.payload) {
         .Hello => |*hello| {
             hello.client_name = try allocator.dupe(u8, hello.client_name);
@@ -490,15 +553,25 @@ pub fn fromJson(json_str: []const u8, allocator: std.mem.Allocator) !Message {
         .FilterUpdate => |*filter| {
             filter.filter_expression = try allocator.dupe(u8, filter.filter_expression);
         },
-        else => {}, // Other message types don't have string fields
+        else => {}, // other message types don't have string fields
     }
 
     return result;
 }
 
 /// Validate that a message is well-formed before sending
+///
+/// Performs comprehensive validation of message structure, contents, and relationships
+/// to prevent malformed messages from being transmitted. Checks include version 
+/// compatibility, payload size validation, and message-type-specific validations.
+///
+/// Parameters:
+///   self: Pointer to the message to validate
+///
+/// Returns:
+///   null if the message is valid, or an ErrorInfo structure describing the issue
 pub fn validate(self: *const Message) ?ErrorInfo {
-    // Check protocol version
+    // check protocol version
     if (self.header.version != PROTOCOL_VERSION) {
         return ErrorInfo{
             .code = .ProtocolMismatch,
@@ -508,7 +581,7 @@ pub fn validate(self: *const Message) ?ErrorInfo {
         };
     }
 
-    // Validate payload size based on message type
+    // validate payload size based on message type
     const min_size: u32 = switch (self.header.msg_type) {
         .Hello => @sizeOf(HelloPayload),
         .Heartbeat => @sizeOf(HeartbeatPayload),
@@ -532,7 +605,7 @@ pub fn validate(self: *const Message) ?ErrorInfo {
         };
     }
 
-    // Content validations based on message type
+    // content validations based on message type
     switch (self.payload) {
         .Hello => |hello| {
             if (hello.client_name.len == 0) {
@@ -565,8 +638,8 @@ pub fn validate(self: *const Message) ?ErrorInfo {
             }
         },
         .PacketEvent => |_| {
-            // Basic structure validation handled by min_size check above
-            // Could add more specific validations if needed
+            // basic structure validation handled by min_size check above
+            // could add more specific validations in the future (TODO)
         },
         .FlowUpdate => |flow| {
             if (flow.packet_count == 0 and flow.active_time_ms > 0) {
@@ -574,7 +647,7 @@ pub fn validate(self: *const Message) ?ErrorInfo {
                     .code = .MessageCorrupted,
                     .component = "ipc.messages",
                     .message = "Flow update has active time but no packets",
-                    .recoverable = true, // Not critical
+                    .recoverable = true, // not critical
                 };
             }
         },
@@ -607,13 +680,23 @@ pub fn validate(self: *const Message) ?ErrorInfo {
                 };
             }
         },
-        else => {}, // No specific validation for other types
+        else => {}, // no specific validation for other types
     }
 
-    return null; // No validation errors
+    return null; // no validation errors
 }
 
-// Helper function to determine message size for binary formats
+/// Calculate total message size including dynamic content
+///
+/// Determines the total size of a message including all dynamic fields,
+/// which is necessary for binary serialization and buffer allocation.
+/// Handles each message type specifically to account for string lengths.
+///
+/// Parameters:
+///   self: Pointer to the message to measure
+///
+/// Returns:
+///   Total size in bytes required to represent the message in binary form
 pub fn calculateMessageSize(self: *const Message) usize {
     var size: usize = @sizeOf(MessageHeader);
 
@@ -668,42 +751,63 @@ pub fn calculateMessageSize(self: *const Message) usize {
 }
 
 /// Test utility to round-trip a message through JSON serialization and deserialization
+///
+/// Useful for testing that serialization and deserialization work correctly by
+/// ensuring a message maintains its structure after the round-trip process.
+///
+/// Parameters:
+///   msg: Message to round-trip through JSON
+///   allocator: Memory allocator for temporary and result objects
+///
+/// Returns:
+///   A new message that is the result of serializing and deserializing the input
 pub fn testJsonRoundTrip(msg: Message, allocator: std.mem.Allocator) !Message {
-    // Serialize to JSON
+    // serialize to JSON
     const json_str = try toJson(&msg, allocator);
     defer allocator.free(json_str);
 
-    // Deserialize back to a Message
+    // deserialize back to a Message
     return try fromJson(json_str, allocator);
 }
 
 /// Create a binary representation of the message
+///
+/// Serializes a Message into a compact binary format for efficient transmission.
+/// This binary format is platform-independent with explicit byte ordering.
+///
+/// Parameters:
+///   self: Pointer to the message to serialize
+///   allocator: Memory allocator for the resulting binary data
+///
+/// Returns:
+///   Allocated byte array containing the binary representation of the message
+///   Caller takes ownership of the returned memory
 pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
     const total_size = calculateMessageSize(self);
 
-    // Allocate buffer for the entire message
+    // allocate buffer for the entire message
     var buffer = try allocator.alloc(u8, total_size);
     errdefer allocator.free(buffer);
 
-    // Write header
+    // write header
     std.mem.writeInt(u16, buffer[0..2], self.header.version, .big);
     std.mem.writeInt(u64, buffer[2..10], self.header.sequence, .big);
     std.mem.writeInt(i64, buffer[10..18], self.header.timestamp, .big);
     buffer[18] = @intFromEnum(self.header.msg_type);
     std.mem.writeInt(u32, buffer[19..23], self.header.payload_size, .big);
 
-    // Write payload (varies by type)
+    // write payload (varies by type)
     switch (self.payload) {
         .Hello => |p| {
             var offset: usize = @sizeOf(MessageHeader);
 
-            // Write fixed-size fields
+            // write fixed-size fields
             std.mem.writeInt(u16, buffer[offset..][0..2], p.client_version, .big);
             offset += 2;
             std.mem.writeInt(u32, buffer[offset..][0..4], p.capabilities, .big);
             offset += 4;
 
-            // Write string length and content
+            // write string length and content
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.client_name.len), .big);
             offset += 4;
             @memcpy(buffer[offset..][0..p.client_name.len], p.client_name);
@@ -711,28 +815,27 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
         .SligAlert => |p| {
             var offset: usize = @sizeOf(MessageHeader);
 
-            // Write fixed-size fields first
+            // write fixed-size fields first
             std.mem.writeInt(u64, buffer[offset..][0..8], p.alert_id, .big);
             offset += 8;
             std.mem.writeInt(i64, buffer[offset..][0..8], p.timestamp, .big);
             offset += 8;
             buffer[offset] = @intFromEnum(p.severity);
             offset += 1;
-            // ... write all other fixed-size fields ...
 
-            // Write category
+            // write category
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.category.len), .big);
             offset += 4;
             @memcpy(buffer[offset..][0..p.category.len], p.category);
             offset += p.category.len;
 
-            // Write message
+            // write message
             std.mem.writeInt(u32, buffer[offset..][0..4], @intCast(p.message.len), .big);
             offset += 4;
             @memcpy(buffer[offset..][0..p.message.len], p.message);
             offset += p.message.len;
 
-            // Write evidence if present
+            // write evidence if present
             if (p.evidence) |evidence| {
                 buffer[offset] = 1; // has evidence
                 offset += 1;
@@ -763,8 +866,7 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
             return buffer;
         },
         else => {
-            // For other message types, implement binary serialization here
-            // This is just a placeholder to show the pattern
+            // implement binary serialization here (TODO)
             @panic("Binary serialization not implemented for this message type");
         },
     }
@@ -773,12 +875,23 @@ pub fn toBinary(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
 }
 
 /// Parse a Message from binary data
+///
+/// Deserializes a binary message back into a structured Message object.
+/// Validates the message format and ensures memory safety.
+///
+/// Parameters:
+///   data: Binary representation of a Message
+///   allocator: Memory allocator for the resulting Message and its contents
+///
+/// Returns:
+///   Fully populated Message structure with independent memory ownership
+///   Caller takes ownership of the returned Message and must call deinit()
 pub fn fromBinary(data: []const u8, allocator: std.mem.Allocator) !Message {
     if (data.len < @sizeOf(MessageHeader)) {
         return error.InvalidMessageFormat;
     }
 
-    // Parse header
+    // parse header
     const header = MessageHeader{
         .version = std.mem.readInt(u16, data[0..2], .big),
         .sequence = std.mem.readInt(u64, data[2..10], .big),
@@ -787,7 +900,7 @@ pub fn fromBinary(data: []const u8, allocator: std.mem.Allocator) !Message {
         .payload_size = std.mem.readInt(u32, data[19..23], .big),
     };
 
-    // Validate header
+    // validate header
     if (header.version != PROTOCOL_VERSION) {
         return error.ProtocolVersionMismatch;
     }
@@ -796,7 +909,7 @@ pub fn fromBinary(data: []const u8, allocator: std.mem.Allocator) !Message {
         return error.MessageTruncated;
     }
 
-    // Parse payload based on message type
+    // parse payload based on message type
     var payload: Message.Payload = undefined;
     var offset: usize = @sizeOf(MessageHeader);
 
@@ -828,7 +941,6 @@ pub fn fromBinary(data: []const u8, allocator: std.mem.Allocator) !Message {
                 },
             };
         },
-        // Implement other message types similarly
         else => {
             return error.UnsupportedMessageType;
         },
@@ -841,6 +953,18 @@ pub fn fromBinary(data: []const u8, allocator: std.mem.Allocator) !Message {
 }
 
 /// Create a Hello message to establish an IPC connection
+///
+/// Factory function that creates a properly formatted Hello message with
+/// appropriate sizing and timestamp information.
+///
+/// Parameters:
+///   sequence: Unique message sequence number
+///   client_name: Name of the connecting client
+///   client_version: Version of the connecting client
+///   capabilities: Bitfield of client feature capabilities
+///
+/// Returns:
+///   A fully formatted Hello message ready for transmission
 pub fn createHelloMsg(sequence: u64, client_name: []const u8, client_version: u16, capabilities: u32) Message {
     return Message{
         .header = MessageHeader{
@@ -863,7 +987,17 @@ pub fn createHelloMsg(sequence: u64, client_name: []const u8, client_version: u1
     };
 }
 
-/// Create a Heartbeat message
+/// Create a Heartbeat message for connection maintenance
+///
+/// Factory function that creates a properly formatted Heartbeat message to
+/// indicate that a connection is still active.
+///
+/// Parameters:
+///   sequence: Unique message sequence number
+///   uptime_seconds: Time in seconds since the sender initialized
+///
+/// Returns:
+///   A fully formatted Heartbeat message ready for transmission
 pub fn createHeartbeatMsg(sequence: u64, uptime_seconds: u64) Message {
     return Message{
         .header = MessageHeader{
@@ -884,7 +1018,18 @@ pub fn createHeartbeatMsg(sequence: u64, uptime_seconds: u64) Message {
     };
 }
 
-/// Create a Shutdown message
+/// Create a Shutdown message to request graceful termination
+///
+/// Factory function that creates a properly formatted Shutdown message with
+/// a reason and restart flag to indicate how the receiver should handle shutdown.
+///
+/// Parameters:
+///   sequence: Unique message sequence number
+///   reason: Human-readable explanation for the shutdown
+///   restart: Whether the receiver should restart after shutdown
+///
+/// Returns:
+///   A fully formatted Shutdown message ready for transmission
 pub fn createShutdownMsg(sequence: u64, reason: []const u8, restart: bool) Message {
     return Message{
         .header = MessageHeader{
@@ -906,7 +1051,17 @@ pub fn createShutdownMsg(sequence: u64, reason: []const u8, restart: bool) Messa
     };
 }
 
-/// Create a detection stats message
+/// Create a detection stats message with engine metrics
+///
+/// Factory function that creates a properly formatted DetectionStats message
+/// containing operational metrics from the detection engine.
+///
+/// Parameters:
+///   sequence: Unique message sequence number
+///   stats: Detection engine statistics to include in the message
+///
+/// Returns:
+///   A fully formatted DetectionStats message ready for transmission
 pub fn createDetectionStatsMsg(sequence: u64, stats: DetectionStats) Message {
     return Message{
         .header = MessageHeader{
@@ -920,6 +1075,17 @@ pub fn createDetectionStatsMsg(sequence: u64, stats: DetectionStats) Message {
 }
 
 /// Convert a detection alert to a SligAlert for IPC transmission
+///
+/// Transforms an internal detection system alert into the IPC-compatible format
+/// with proper memory allocation for dynamic fields.
+///
+/// Parameters:
+///   allocator: Memory allocator for string fields
+///   alert: Source detection alert to convert
+///
+/// Returns:
+///   A fully populated SligAlert structure with allocated strings
+///   Caller takes ownership of string fields and must call deinit()
 pub fn fromDetectionAlert(allocator: std.mem.Allocator, alert: detection.Alert) !SligAlert {
     return SligAlert{
         .alert_id = alert.id,
