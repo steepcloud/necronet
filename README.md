@@ -102,6 +102,8 @@ necronet/
 ├── ipc/             # Inter-process communication
 │   ├── ipc.zig      # IPC transport layer
 │   └── messages.zig # Message protocol definitions
+├── src/
+│   └── main.zig     # Application entry point
 ├── tests/           # Comprehensive test suite
 └── ui/              # Frontend (WIP)
 ```
