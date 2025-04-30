@@ -136,7 +136,7 @@ pub const SligAlert = struct {
     /// Create a SligAlert from a detection.Alert
     /// Converts internal alert representation to IPC-compatible format
     pub fn fromDetectionAlert(alert: detection.Alert, allocator: std.mem.Allocator) !SligAlert {
-        var slig_alert = SligAlert{
+        const slig_alert = SligAlert{
             .alert_id = alert.id,
             .timestamp = alert.timestamp,
             .severity = alert.severity,
@@ -147,14 +147,10 @@ pub const SligAlert = struct {
             .dest_ip = alert.dest_ip,
             .source_port = alert.source_port,
             .dest_port = alert.dest_port,
-            .flow_id = alert.connection_id,
+            .flow_id = alert.flow_id orelse 0,
             .confidence = 1.0,
             .evidence = null,
         };
-
-        if (alert.evidence) |evidence| {
-            slig_alert.evidence = try allocator.dupe(u8, evidence);
-        }
 
         return slig_alert;
     }
@@ -1080,13 +1076,13 @@ pub fn createDetectionStatsMsg(sequence: u64, stats: DetectionStats) Message {
 /// with proper memory allocation for dynamic fields.
 ///
 /// Parameters:
-///   allocator: Memory allocator for string fields
 ///   alert: Source detection alert to convert
+///   allocator: Memory allocator for string fields
 ///
 /// Returns:
 ///   A fully populated SligAlert structure with allocated strings
 ///   Caller takes ownership of string fields and must call deinit()
-pub fn fromDetectionAlert(allocator: std.mem.Allocator, alert: detection.Alert) !SligAlert {
+pub fn fromDetectionAlert(alert: detection.Alert, allocator: std.mem.Allocator) !SligAlert {
     return SligAlert{
         .alert_id = alert.id,
         .flow_id = alert.flow_id orelse 0,

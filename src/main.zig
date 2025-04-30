@@ -171,8 +171,8 @@ pub fn main() !void {
                     
                     // only send alert message if there is an alert for this packet
                     if (try engine.analyzePacket(packet, packet_bytes)) |alert_result| {
-                        const slig_alert = try msg.fromDetectionAlert(allocator, alert_result);
-                        const alert_msg = msg.createSligAlertMsg(alert_count, slig_alert);
+                        const slig_alert = try msg.SligAlert.fromDetectionAlert(alert_result, allocator);
+                        const alert_msg = try msg.createSligAlertMsg(alert_count, slig_alert, allocator);
 
                         _ = ipc_server.?.broadcast(&alert_msg) catch |err| {
                             std.log.warn("Failed to send alert: {}", .{err});
