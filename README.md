@@ -68,7 +68,7 @@ Components communicate via a custom IPC protocol that supports multiple transpor
 
 2. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/necronet.git
+   git clone https://github.com/steepcloud/necronet.git
    cd necronet
    ```
 
