@@ -84,10 +84,10 @@ Components communicate via a custom IPC protocol that supports multiple transpor
 
 ## Usage
 
-Currently, only the backend components are functional. Running the analyzer:
+Currently, only the backend components are functional. Running the analyzer (CLI mode):
 
 ```bash
-./zig-out/bin/necronet --interface eth0 --verbose
+zig build run -- --no-gui
 ```
 
 ## Project Structure
@@ -120,7 +120,7 @@ The UI components are currently a work in progress and not functional yet.
 
 Contributions are welcome! Check out the issues for tasks that need attention. Please ensure:
 
-1. All tests pass with `zig build test`
+1. All tests pass with `zig build test --summary all`
 2. New features include appropriate tests
 3. Code follows existing documentation patterns
 
