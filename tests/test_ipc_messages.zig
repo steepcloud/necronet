@@ -154,7 +154,7 @@ test "Factory functions create valid messages" {
     
     // Test SligAlert message creation
     {
-        var alert = try messages.fromDetectionAlert(allocator, createMockDetectionAlert());
+        var alert = try messages.fromDetectionAlert(createMockDetectionAlert(), allocator);
         defer alert.deinit(allocator);
         
         var msg = try messages.createSligAlertMsg(5, alert, allocator);
@@ -254,7 +254,7 @@ test "Message JSON serialization and deserialization round-trip" {
     
     // Create message with various field types to test serialization
     var original_msg = blk: {
-        var alert = try messages.fromDetectionAlert(allocator, createMockDetectionAlert());
+        var alert = try messages.fromDetectionAlert(createMockDetectionAlert(), allocator);
         defer alert.deinit(allocator);
 
         const msg = try messages.createSligAlertMsg(42, alert, allocator);
@@ -344,7 +344,7 @@ test "Message validation detects malformed messages" {
     
     // Test SligAlert with empty category/message
     {
-        var alert = try messages.fromDetectionAlert(allocator, createMockDetectionAlert());
+        var alert = try messages.fromDetectionAlert(createMockDetectionAlert(), allocator);
         defer alert.deinit(allocator);
         
         var msg = try messages.createSligAlertMsg(5, alert, allocator);
@@ -400,7 +400,7 @@ test "fromDetectionAlert conversion function" {
     const detection_alert = createMockDetectionAlert();
     
     // Convert to SligAlert
-    var slig_alert = try messages.fromDetectionAlert(allocator, detection_alert);
+    var slig_alert = try messages.fromDetectionAlert(detection_alert, allocator);
     defer slig_alert.deinit(allocator);
     
     // Verify fields were correctly copied/converted
@@ -577,7 +577,7 @@ test "calculateMessageSize is accurate" {
     
     // Test SligAlert with evidence
     {
-        var alert = try messages.fromDetectionAlert(allocator, createMockDetectionAlert());
+        var alert = try messages.fromDetectionAlert(createMockDetectionAlert(), allocator);
         alert.evidence = try allocator.dupe(u8, "Evidence data");
         defer alert.deinit(allocator);
         
