@@ -298,33 +298,35 @@ fn printPacketInfo(packet: capture.PacketInfo) void {
                 defer proto_parser.deinit(std.heap.page_allocator);
 
                 // HTTP
-                const http: *parser.HttpParser = @fieldParentPtr("base", proto_parser);
-                if (http.is_request and http.method.len > 0 and http.uri.len > 0) {
-                    std.debug.print("  HTTP Request: {s} {s}\n", .{http.method, http.uri});
-                } else if (!http.is_request and http.status_code.len > 0 and http.reason_phrase.len > 0) {
-                    std.debug.print("  HTTP Response: {s} {s}\n", .{http.status_code, http.reason_phrase});
-                }
-
-                // DNS
-                const dns: *parser.DnsParser = @fieldParentPtr("base", proto_parser);
-                if (dns.questions.items.len > 0) {
-                    std.debug.print("  DNS Questions:\n", .{});
-                    for (dns.questions.items) |q| {
-                        std.debug.print("    {s} (type {d})\n", .{q.name, q.type});
+                if (packet.protocol == .TCP and (packet.dest_port == 80 or packet.dest_port == 8080)) {
+                    const http: *parser.HttpParser = @fieldParentPtr("base", proto_parser);
+                    if (http.is_request and http.method.len > 0 and http.uri.len > 0) {
+                        std.debug.print("  HTTP Request: {s} {s}\n", .{http.method, http.uri});
+                    } else if (!http.is_request and http.status_code.len > 0 and http.reason_phrase.len > 0) {
+                        std.debug.print("  HTTP Response: {s} {s}\n", .{http.status_code, http.reason_phrase});
                     }
-                }
-                if (dns.answers.items.len > 0) {
-                    std.debug.print("  DNS Answers:\n", .{});
-                    for (dns.answers.items) |a| {
-                        std.debug.print("    {s} (type {d})", .{a.name, a.type});
-                        if (a.type == 1 or a.type == 28 or a.type == 5) { // A, AAAA, CNAME
-                            std.debug.print(" -> {s}", .{a.data});
-                        } else if (a.data.len > 0) {
-                            std.debug.print(" [RDATA: ", .{});
-                            for (a.data) |b| std.debug.print("{X:0>2} ", .{b});
-                            std.debug.print("]", .{});
+                } else if ((packet.protocol == .TCP or packet.protocol == .UDP) and (packet.dest_port == 53 or packet.source_port == 53)) {
+                    // DNS
+                    const dns: *parser.DnsParser = @fieldParentPtr("base", proto_parser);
+                    if (dns.questions.items.len > 0) {
+                        std.debug.print("  DNS Questions:\n", .{});
+                        for (dns.questions.items) |q| {
+                            std.debug.print("    {s} (type {d})\n", .{q.name, q.type});
                         }
-                        std.debug.print("\n", .{});
+                    }
+                    if (dns.answers.items.len > 0) {
+                        std.debug.print("  DNS Answers:\n", .{});
+                        for (dns.answers.items) |a| {
+                            std.debug.print("    {s} (type {d})", .{a.name, a.type});
+                            if (a.type == 1 or a.type == 28 or a.type == 5) { // A, AAAA, CNAME
+                                std.debug.print(" -> {s}", .{a.data});
+                            } else if (a.data.len > 0) {
+                                std.debug.print(" [RDATA: ", .{});
+                                for (a.data) |b| std.debug.print("{X:0>2} ", .{b});
+                                std.debug.print("]", .{});
+                            }
+                            std.debug.print("\n", .{});
+                        }
                     }
                 }
             }

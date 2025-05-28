@@ -435,11 +435,16 @@ pub const DnsParser = struct {
         if (data.len < 12) return ParseError.InsufficientData;
         
         // parse DNS header fields (all big-endian)
-        self.transaction_id = ((@as(u16, data[0]) << 8) | @as(u16, data[1]));
-        const flags = ((@as(u16, data[2]) << 8) | @as(u16, data[3]));
+            //self.transaction_id = ((@as(u16, data[0]) << 8) | @as(u16, data[1]));
+            //const flags = ((@as(u16, data[2]) << 8) | @as(u16, data[3]));
+            //self.is_query = (flags & 0x8000) == 0;
+            //self.query_count = ((@as(u16, data[4]) << 8) | @as(u16, data[5]));
+            //self.answer_count = ((@as(u16, data[6]) << 8) | @as(u16, data[7]));
+        self.transaction_id = std.mem.readInt(u16, data[0..2], .big);
+        const flags = std.mem.readInt(u16, data[2..4], .big);
         self.is_query = (flags & 0x8000) == 0;
-        self.query_count = ((@as(u16, data[4]) << 8) | @as(u16, data[5]));
-        self.answer_count = ((@as(u16, data[6]) << 8) | @as(u16, data[7]));
+        self.query_count = std.mem.readInt(u16, data[4..6], .big);
+        self.answer_count = std.mem.readInt(u16, data[6..8], .big);
 
         var offset: usize = 12;
 
@@ -579,7 +584,7 @@ pub const DnsParser = struct {
 /// Returns:
 ///   An initialized protocol parser or null if no matching parser is available
 ///   May return error on allocation failure
-pub fn createParser(allocator: Allocator, protocol: common.Protocol, dest_port: u16) !?*ProtocolParser {
+pub fn createParser(allocator: Allocator, protocol: common.Protocol, dest_port: u16, source_port: u16) !?*ProtocolParser {
     switch (protocol) {
         .TCP => switch (dest_port) {
             80, 8080 => {
@@ -592,7 +597,7 @@ pub fn createParser(allocator: Allocator, protocol: common.Protocol, dest_port: 
             },
             else => return null,
         },
-        .UDP => if (dest_port == 53) {
+        .UDP => if (dest_port == 53 or source_port == 53) {
             const dns_parser = try DnsParser.init(allocator);
             return &dns_parser.base;
         } else return null,
@@ -614,7 +619,7 @@ pub fn createParser(allocator: Allocator, protocol: common.Protocol, dest_port: 
 ///   Populated parser with parsed protocol data or null if no parser was found
 ///   May return error if parsing fails
 pub fn parsePacket(allocator: Allocator, packet: capture.PacketInfo, data: []const u8) !?*ProtocolParser {
-    var parser = try createParser(allocator, packet.protocol, packet.dest_port);
+    var parser = try createParser(allocator, packet.protocol, packet.dest_port, packet.source_port);
     if (parser == null) return null;
     if (packet.payload) |payload| {
         try parser.?.parse(payload);
