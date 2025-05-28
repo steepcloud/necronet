@@ -68,7 +68,7 @@ Components communicate via a custom IPC protocol that supports multiple transpor
 
 2. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/necronet.git
+   git clone https://github.com/steepcloud/necronet.git
    cd necronet
    ```
 
@@ -102,6 +102,8 @@ necronet/
 ├── ipc/             # Inter-process communication
 │   ├── ipc.zig      # IPC transport layer
 │   └── messages.zig # Message protocol definitions
+├── src/
+│   └── main.zig     # Application entry point
 ├── tests/           # Comprehensive test suite
 └── ui/              # Frontend (WIP)
 ```
