@@ -1,5 +1,5 @@
 const std = @import("std");
-// TODO: add tests for ipc/*.zig
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

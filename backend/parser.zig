@@ -128,7 +128,7 @@ pub const HttpParser = struct {
         while (i < data.len) {
             switch (self.state) {
                 .StartLine => {
-                    // find the end of the first lien (request line or status line)
+                    // find the end of the first line (request line or status line)
                     const line_end = std.mem.indexOfScalarPos(u8, data, i, '\n') orelse return ParseError.InsufficientData;
                     const line = data[i..line_end];
                     if (line.len > 0) {

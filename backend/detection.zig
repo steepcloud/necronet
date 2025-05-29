@@ -724,6 +724,76 @@ pub const DetectionEngine = struct {
             ),
             .requires_conn_state = false,
         });
+
+        // HTTP traffic detection
+        try self.addRule(DetectionRule{
+            .id = 2001,
+            .enabled = true,
+            .name = try self.allocator.dupe(u8, "HTTP Traffic Detected"),
+            .severity = .Low,
+            .condition = detectBasicHttpTraffic,
+            .message_template = try self.allocator.dupe(
+                u8,
+                "HTTP traffic from {d}.{d}.{d}.{d}:{d} to {d}.{d}.{d}.{d}:{d}"
+            ),
+            .requires_conn_state = true,
+        });
+
+        // Multiple small connections
+        try self.addRule(DetectionRule{
+            .id = 2002,
+            .enabled = true,
+            .name = try self.allocator.dupe(u8, "Multiple Small Connections"),
+            .severity = .Low,
+            .condition = detectMultipleSmallConnections,
+            .message_template = try self.allocator.dupe(
+                u8, 
+                "Multiple small connections from {d}.{d}.{d}.{d}:{d}"
+            ),
+            .requires_conn_state = true,
+        });
+
+        // Non-standard HTTP method
+        try self.addRule(DetectionRule{
+            .id = 2003,
+            .enabled = true,
+            .name = try self.allocator.dupe(u8, "Non-Standard HTTP Method"),
+            .severity = .Low,
+            .condition = detectNonStandardHttpMethod,
+            .message_template = try self.allocator.dupe(
+                u8, 
+                "Non-standard HTTP method from {d}.{d}.{d}.{d}:{d}"
+            ),
+            .requires_conn_state = true,
+        });
+
+        // Backdoor communication
+        try self.addRule(DetectionRule{
+            .id = 3003,
+            .enabled = true,
+            .name = try self.allocator.dupe(u8, "Backdoor Communication"),
+            .severity = .Critical,
+            .condition = detectBackdoorCommunication,
+            .message_template = try self.allocator.dupe(
+                u8, 
+                "Backdoor communication detected from {d}.{d}.{d}.{d}:{d} to {d}.{d}.{d}.{d}:{d}"
+            ),
+            .requires_conn_state = false,
+        });
+
+        // Known exploit attempt
+        try self.addRule(DetectionRule{
+            .id = 3005,
+            .enabled = true,
+            .name = try self.allocator.dupe(u8, "Known Exploit Attempt"),
+            .severity = .Critical,
+            .condition = detectKnownExploit,
+            .message_template = try self.allocator.dupe(
+                u8, 
+                "Known exploit attempt from {d}.{d}.{d}.{d}:{d} to {d}.{d}.{d}.{d}:{d}"
+            ),
+            .requires_conn_state = true,
+        });
     }
 };
 
@@ -1250,18 +1320,26 @@ fn detectHighBandwidth(_: capture.PacketInfo, conn_state: ?*const ConnectionStat
 }
 
 /// Detect SYN flood attacks (TCP DoS technique)
-pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+pub fn detectSynFlood(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     if (conn_state) |conn| {
         // alert on connections that stay in SYN_SENT state with multiple packets
-        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 200;
+        const SYN_FLOOD_PACKET_THRESHOLD: u32 = 25;
 
         const now = std.time.timestamp();
         const time_window = now - conn.first_seen;
-        const MIN_TIME_WINDOW: i64 = 10; // at least 10 seconds to avoid false positives
-        
-        return conn.tcp_state == .SynSent and 
-               conn.packet_count >= SYN_FLOOD_PACKET_THRESHOLD and
-               time_window <= MIN_TIME_WINDOW;
+        //const MIN_TIME_WINDOW: i64 = 10; // at least 10 seconds to avoid false positives
+        const MAX_TIME_WINDOW: i64 = 20;
+
+        if (packet.protocol != .TCP or conn.tcp_state != .SynSent) {
+            return false;
+        }
+
+        const has_enough_packets = conn.packet_count >= SYN_FLOOD_PACKET_THRESHOLD;
+        const is_rapid = time_window <= MAX_TIME_WINDOW;
+
+        const high_rate = conn.packets_per_second > 5.0;
+
+        return has_enough_packets and is_rapid and high_rate;
     }
     return false;
 }
@@ -1270,6 +1348,16 @@ pub fn detectSynFlood(_: capture.PacketInfo, conn_state: ?*const ConnectionState
 fn detectPortScan(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
     // perform connection-level checks first
     if (conn_state) |conn| {
+        if (packet.protocol == .TCP and conn.tcp_state == .SynSent) {
+            if (conn.packet_count > 10) {
+                return false; // potential SYN flood, not a scan
+            }
+
+            if (conn.packets_per_second > 3.0 and conn.packet_count > 5) {
+                return false; // too high rate, likely not a scan
+            }
+        }
+        
         // 1. Connection-level characteristics of port scans
         
         // SYN scan detection - single packet, SYN only, no further communication
@@ -1590,6 +1678,97 @@ fn detectDnsAnomaly(packet: capture.PacketInfo, conn_state: ?*const ConnectionSt
     return false;
 }
 
+/// Detect basic HTTP traffic
+fn detectBasicHttpTraffic(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+    if (conn_state) |conn| {
+        if (conn.payload_sample) |payload| {
+            // simple HTTP detection
+            return std.mem.indexOf(u8, payload, "GET ") != null or
+                   std.mem.indexOf(u8, payload, "POST ") != null or
+                   std.mem.indexOf(u8, payload, "HTTP/") != null;
+        }
+    }
+    return false;
+}
+
+/// Detect multiple small connections
+fn detectMultipleSmallConnections(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+    if (conn_state) |conn| {
+        // alert on connections with moderate packet count but low data
+        return conn.packet_count >= 3 and 
+               conn.packet_count <= 10 and 
+               conn.byte_count < 1000;
+    }
+    return false;
+}
+
+/// Detect non-standard HTTP methods
+fn detectNonStandardHttpMethod(_: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+    if (conn_state) |conn| {
+        if (conn.payload_sample) |payload| {
+            const unusual_methods = [_][]const u8{
+                "TRACE ", "OPTIONS ", "CONNECT ", "PATCH ", "DELETE "
+            };
+            
+            for (unusual_methods) |method| {
+                if (std.mem.indexOf(u8, payload, method) != null) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Detect backdoor communication
+fn detectBackdoorCommunication(packet: capture.PacketInfo, _: ?*const ConnectionState) bool {
+    // checking for connections to known backdoor ports
+    const backdoor_ports = [_]u16{
+        1337, 4444, 5554, 6666, 12345, 31337, 9999, 6969, 1234, 54321
+    };
+    
+    for (backdoor_ports) |port| {
+        if (packet.dest_port == port or packet.source_port == port) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+/// Enhanced detection that checks the full packet data
+fn detectKnownExploit(packet: capture.PacketInfo, conn_state: ?*const ConnectionState) bool {
+    if (packet.payload) |direct_payload| {
+        const exploit_patterns = [_][]const u8{
+            "cmd=", "exec=", "file=", "info=", 
+            "bash%20-i", "cmd.exe%20", "uname%20-a", "../../../etc/"
+        };
+        
+        for (exploit_patterns) |pattern| {
+            if (std.mem.indexOf(u8, direct_payload, pattern) != null) {
+                return true;
+            }
+        }
+    }
+    
+    if (conn_state) |conn| {
+        if (conn.payload_sample) |payload| {
+            const exploit_patterns = [_][]const u8{
+                "cmd=", "exec=", "file=", "info=", 
+                "bash%20-i", "cmd.exe%20", "uname%20-a", "../../../etc/"
+            };
+            
+            for (exploit_patterns) |pattern| {
+                if (std.mem.indexOf(u8, payload, pattern) != null) {
+                    return true;
+                }
+            }
+        }
+    }
+    
+    return false;
+}
+
 /// Global tracker for port scanning activities across all connections
 /// Maintains state about scanning patterns to detect horizontal, vertical and block scans
 const PortScanTracker = struct {
@@ -1645,7 +1824,6 @@ const PortScanTracker = struct {
             scan_state.scan_rate = @as(f32, @floatFromInt(scan_state.target_ports.count())) / 
                              @as(f32, @floatFromInt(time_window));
         }
-        
         // Different scan detection criteria:
         
         // 1. Horizontal scan (many ports on same IP)
