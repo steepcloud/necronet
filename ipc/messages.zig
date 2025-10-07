@@ -38,6 +38,11 @@ pub const MessageType = enum(u8) {
     ConfigUpdate, // Configuration change request
     CaptureControl, // Start/stop/pause packet capture
     FilterUpdate, // Update capture/display filters
+
+    // Shrykull scanner messages
+    ScanRequest, // Request vulnerability scan
+    ScanResult, // Vulnerability scan results
+    ScanStatus, // Scan progress update
 };
 
 /// Header included with every IPC message
@@ -259,6 +264,54 @@ pub const FilterUpdatePayload = struct {
     apply_immediately: bool = true, // whether to apply without waiting
 };
 
+/// Vulnerability scan request payload
+pub const ScanRequestPayload = struct {
+    request_id: []const u8, // Unique scan identifier
+    target_ip: [4]u8, // IP to scan
+    ports: []const u16, // Ports to scan
+    reason: []const u8, // Why we're scanning (alert message)
+    severity: []const u8, // Alert severity that triggered scan
+    attack_type: []const u8, // Type of attack detected
+    payload_sample: ?[]const u8, // Sample of malicious payload
+    scan_depth: []const u8, // quick|standard|full
+    timeout: u32, // Scan timeout in seconds
+    priority: []const u8, // low|medium|high|critical
+};
+
+/// Individual vulnerability finding from scan
+pub const ScanFinding = struct {
+    finding_type: []const u8, // open_port|vulnerability|config_issue
+    severity: []const u8, // Low|Medium|High|Critical
+    port: u16, // Affected port
+    service: []const u8, // Service name/version
+    oddworld_theme: []const u8, // Oddworld-themed description
+    details: []const u8, // Finding details
+    cve_matches: []const []const u8, // Matching CVEs
+    exploit_available: bool, // Whether exploit exists
+    remediation: []const u8, // How to fix
+};
+
+/// Vulnerability scan result payload
+pub const ScanResultPayload = struct {
+    response_id: []const u8, // Matching request_id
+    status: []const u8, // completed|failed|timeout
+    target: []const u8, // Target IP scanned
+    scan_duration: f64, // Time taken in seconds
+    findings: []const ScanFinding, // All findings
+    total_ports_scanned: u32, // Scan summary
+    open_ports: u32,
+    vulnerabilities_found: u32,
+    risk_score: f64, // Overall risk (0.0-10.0)
+};
+
+/// Scan status update payload (progress indicator)
+pub const ScanStatusPayload = struct {
+    request_id: []const u8, // Which scan this is for
+    status: []const u8, // scanning|queued|cancelled
+    progress: u8, // 0-100%
+    current_task: []const u8, // What's happening now
+};
+
 /// Top-level wrapper for all IPC messages
 /// Provides a unified container for all message types with common header
 pub const Message = struct {
@@ -279,6 +332,10 @@ pub const Message = struct {
         ConfigUpdate: ConfigUpdatePayload,
         CaptureControl: CaptureControlPayload,
         FilterUpdate: FilterUpdatePayload,
+        // Shrykull scanner payloads
+        ScanRequest: ScanRequestPayload,
+        ScanResult: ScanResultPayload,
+        ScanStatus: ScanStatusPayload,
     };
 
     /// Free memory associated with this message
@@ -297,6 +354,42 @@ pub const Message = struct {
                 if (p.device_name) |name| allocator.free(name);
             },
             .FilterUpdate => |p| allocator.free(p.filter_expression),
+            .ScanRequest => |p| {
+                allocator.free(p.request_id);
+                allocator.free(p.ports);
+                allocator.free(p.reason);
+                allocator.free(p.severity);
+                allocator.free(p.attack_type);
+                if (p.payload_sample) |payload| allocator.free(payload);
+                allocator.free(p.scan_depth);
+                allocator.free(p.priority);
+            },
+            .ScanResult => |p| {
+                allocator.free(p.response_id);
+                allocator.free(p.status);
+                allocator.free(p.target);
+
+                for (p.findings) |finding| {
+                    allocator.free(finding.finding_type);
+                    allocator.free(finding.severity);
+                    allocator.free(finding.service);
+                    allocator.free(finding.oddworld_theme);
+                    allocator.free(finding.details);
+
+                    for (finding.cve_matches) |cve| {
+                        allocator.free(cve);
+                    }
+                    allocator.free(finding.cve_matches);
+                    allocator.free(finding.remediation);
+                }
+                allocator.free(p.findings);
+            },
+            .ScanStatus => |p| {
+                allocator.free(p.request_id);
+                allocator.free(p.status);
+                allocator.free(p.current_task);
+            },
+
             else => {}, // no allocation needed for other message types
         }
     }
@@ -590,6 +683,9 @@ pub fn validate(self: *const Message) ?ErrorInfo {
         .ConfigUpdate => @sizeOf(ConfigUpdatePayload),
         .CaptureControl => @sizeOf(CaptureControlPayload),
         .FilterUpdate => @sizeOf(FilterUpdatePayload),
+        .ScanRequest => @sizeOf(ScanRequestPayload),
+        .ScanResult => @sizeOf(ScanResultPayload),
+        .ScanStatus => @sizeOf(ScanStatusPayload),
     };
 
     if (self.header.payload_size < min_size) {
@@ -676,6 +772,36 @@ pub fn validate(self: *const Message) ?ErrorInfo {
                 };
             }
         },
+        .ScanRequest => |req| {
+            if (req.request_id.len == 0 or req.reason.len == 0) {
+                return ErrorInfo{
+                    .code = .MessageCorrupted,
+                    .component = "ipc.messages",
+                    .message = "ScanRequest missing required fields",
+                    .recoverable = false,
+                };
+            }
+        },
+        .ScanResult => |res| {
+            if (res.response_id.len == 0 or res.target.len == 0) {
+                return ErrorInfo{
+                    .code = .MessageCorrupted,
+                    .component = "ipc.messages",
+                    .message = "ScanResult missing required fields",
+                    .recoverable = false,
+                };
+            }
+        },
+        .ScanStatus => |status| {
+            if (status.request_id.len == 0 or status.progress > 100) {
+                return ErrorInfo{
+                    .code = .MessageCorrupted,
+                    .component = "ipc.messages",
+                    .message = "ScanStatus invalid data",
+                    .recoverable = false,
+                };
+            }
+        },
         else => {}, // no specific validation for other types
     }
 
@@ -740,6 +866,43 @@ pub fn calculateMessageSize(self: *const Message) usize {
         .FilterUpdate => |p| {
             size += @sizeOf(@TypeOf(p));
             size += p.filter_expression.len;
+        },
+        .ScanRequest => |p| {
+            size += @sizeOf(ScanRequestPayload);
+            size += p.request_id.len;
+            size += p.ports.len * @sizeOf(u16);
+            size += p.reason.len;
+            size += p.severity.len;
+            size += p.attack_type.len;
+            if (p.payload_sample) |payload| size += payload.len;
+            size += p.scan_depth.len;
+            size += p.priority.len;
+        },
+        .ScanResult => |p| {
+            size += @sizeOf(ScanResultPayload);
+            size += p.response_id.len;
+            size += p.status.len;
+            size += p.target.len;
+            
+            for (p.findings) |finding| {
+                size += @sizeOf(ScanFinding);
+                size += finding.finding_type.len;
+                size += finding.severity.len;
+                size += finding.service.len;
+                size += finding.oddworld_theme.len;
+                size += finding.details.len;
+                size += finding.remediation.len;
+                
+                for (finding.cve_matches) |cve| {
+                    size += cve.len;
+                }
+            }
+        },
+        .ScanStatus => |p| {
+            size += @sizeOf(ScanStatusPayload);
+            size += p.request_id.len;
+            size += p.status.len;
+            size += p.current_task.len;
         },
     }
 
