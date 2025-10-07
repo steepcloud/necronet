@@ -19,7 +19,7 @@ test "getInterfaces basic functionality" {
         test_allocator.free(interfaces);
     }
     // We expect at least one interface on most systems, but allow zero for CI
-    std.debug.print("Found {} interfaces.\n", .{interfaces.len});
+    //std.debug.print("Found {} interfaces.\n", .{interfaces.len});
     // try testing.expect(interfaces.len > 0); // This might be too strict
 }
 
