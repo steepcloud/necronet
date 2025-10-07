@@ -16,6 +16,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const capture = @import("backend");
 const common = @import("common");
+const shrykull = @import("shrykull_manager");
 const log = std.log.scoped(.detection);
 
 /// Error types specific to detection operations
@@ -443,14 +444,17 @@ pub const DetectionEngine = struct {
     alert_counter: std.atomic.Value(u32),
     /// Connection tracker for stateful analysis
     connection_tracker: ConnectionTracker,
+    /// Shrykull vulnerability scanner manager (optional)
+    shrykull_manager: ?*shrykull.ShrykullManager = null,
     
     /// Initialize a new detection engine
-    pub fn init(allocator: Allocator) !DetectionEngine {
+    pub fn init(allocator: Allocator, shrykull_manager: ?*shrykull.ShrykullManager) !DetectionEngine {
         return DetectionEngine{
             .allocator = allocator,
             .rules = std.ArrayList(DetectionRule).init(allocator),
             .alert_counter = std.atomic.Value(u32).init(1), // Start from 1
             .connection_tracker = try ConnectionTracker.init(allocator),
+            .shrykull_manager = shrykull_manager,        
         };
     }
     
@@ -481,7 +485,7 @@ pub const DetectionEngine = struct {
         // first check stateless rules (don't need connection context)
         if (try self.checkStatelessRules(packet_info)) |alert| {
             if (alert.severity == .Critical or alert.severity == .High) {
-                try triggerVulnerabilityScan(alert, packet_info);
+                try triggerVulnerabilityScan(self, alert, packet_info);
             }
             return alert;
         }
@@ -490,7 +494,7 @@ pub const DetectionEngine = struct {
         if (try self.checkStatefulRules(packet_info, conn_state)) |alert| {
             // Trigger vulnerability scan for Critical/High alerts
             if (alert.severity == .Critical or alert.severity == .High) {
-                try triggerVulnerabilityScan(alert, packet_info);
+                try triggerVulnerabilityScan(self, alert, packet_info);
             }
             return alert;
         }
@@ -1781,27 +1785,39 @@ fn detectKnownExploit(packet: capture.PacketInfo, conn_state: ?*const Connection
 }
 
 /// Trigger external vulnerability scan when critical threats detected
-fn triggerVulnerabilityScan(alert: Alert, packet: capture.PacketInfo) !void {
+fn triggerVulnerabilityScan(self: *DetectionEngine, alert: Alert, packet: capture.PacketInfo) !void {
     // Scanning only on Critical or High severity alerts
     if (alert.severity != .Critical and alert.severity != .High) {
         return;
     }
 
+    // Only scan if Shrykull manager is available
+    if (self.shrykull_manager == null) {
+        std.log.debug("Shrykull scanner not enabled, skipping vulnerability scan", .{});
+        return;
+    }
+
     // Build scan request
-    const scan_request = .{
+    const scan_request = shrykull.ScanRequest{
+        .request_id = "",
         .target_ip = packet.source_ip,
         .ports = inferSuspiciousPorts(alert, packet),
         .reason = alert.message,
-        .severity = alert.severity,
+        .severity = @tagName(alert.severity),
         .attack_type = inferAttackType(alert),
-        .payload_sample = if (packet.payload) |p| p[0..@min(256, p.len)] else null,
+        .payload_sample = if (packet.payload) |p| 
+            p[0..@min(256, p.len)] 
+        else 
+            null,
+        .scan_options = .{
+            .depth = if (alert.severity == .Critical) "full" else "standard",
+            .priority = if (alert.severity == .Critical) "critical" else "high",
+        },
     };
 
-    // TODO: Send to Shrykull via IPC when implemented
-    _ = scan_request; // suppress unused variable warning for now
+    try self.shrykull_manager.?.requestScan(scan_request);
 
-    // For now, just log that we would trigger a scan
-    std.log.info("Would trigger vulnerability scan for {s} alert from {d}.{d}.{d}.{d}", 
+    std.log.info("Vulnerability scan triggered for {s} alert from {d}.{d}.{d}.{d}", 
         .{@tagName(alert.severity), packet.source_ip[0], packet.source_ip[1], 
           packet.source_ip[2], packet.source_ip[3]});
 }

@@ -19,6 +19,11 @@ pub fn build(b: *std.Build) void {
     });
     parser_module.addIncludePath(b.path("."));
 
+    const backend_shrykull_module = b.createModule(.{
+        .root_source_file = b.path("backend/shrykull_manager.zig"),
+    });
+    backend_shrykull_module.addIncludePath(b.path("."));
+
     if (target.result.os.tag == .windows) {
         backend_module.addIncludePath(b.path("npcap-sdk-1.15/Include"));
     }
@@ -61,8 +66,11 @@ pub fn build(b: *std.Build) void {
     backend_module.addImport("common", common_module);
     detection_module.addImport("common", common_module);
     detection_module.addImport("backend", backend_module);
+    detection_module.addImport("shrykull_manager", backend_shrykull_module);
     parser_module.addImport("common", common_module);
     parser_module.addImport("backend", backend_module);
+    backend_shrykull_module.addImport("ipc", ipc_module);
+    backend_shrykull_module.addImport("messages", ipc_messages_module);
     ipc_module.addImport("messages", ipc_messages_module);
     ipc_messages_module.addImport("common", common_module);
     ipc_messages_module.addImport("backend", backend_module);
@@ -98,6 +106,7 @@ pub fn build(b: *std.Build) void {
     // add modules to the main executable
     exe.root_module.addImport("backend", backend_module);
     exe.root_module.addImport("detection", detection_module);
+    exe.root_module.addImport("shrykull_manager", backend_shrykull_module);
     exe.root_module.addImport("ipc", ipc_module);
     exe.root_module.addImport("messages", ipc_messages_module);
     exe.root_module.addImport("common", common_module);
@@ -155,6 +164,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // add modules to the tests
+    // TODO: add tests for shrykull_manager and newer stuff
     unit_tests.root_module.addImport("backend", backend_module);
     unit_tests.root_module.addImport("detection", detection_module);
     unit_tests.root_module.addImport("parser", parser_module);

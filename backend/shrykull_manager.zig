@@ -1,6 +1,6 @@
 const std = @import("std");
-const ipc = @import("../ipc/ipc.zig");
-const msg = @import("../ipc/messages.zig");
+const ipc = @import("ipc");
+const msg = @import("messages");
 const Allocator = std.mem.Allocator;
 
 pub const ScanRequest = struct {
