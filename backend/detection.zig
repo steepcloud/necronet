@@ -480,11 +480,22 @@ pub const DetectionEngine = struct {
 
         // first check stateless rules (don't need connection context)
         if (try self.checkStatelessRules(packet_info)) |alert| {
+            if (alert.severity == .Critical or alert.severity == .High) {
+                try triggerVulnerabilityScan(alert, packet_info);
+            }
             return alert;
         }
 
         // then check stateful rules that use connection context
-        return try self.checkStatefulRules(packet_info, conn_state);
+        if (try self.checkStatefulRules(packet_info, conn_state)) |alert| {
+            // Trigger vulnerability scan for Critical/High alerts
+            if (alert.severity == .Critical or alert.severity == .High) {
+                try triggerVulnerabilityScan(alert, packet_info);
+            }
+            return alert;
+        }
+        
+        return null;
     }
 
     /// Check rules that don't require connection state
@@ -1767,6 +1778,46 @@ fn detectKnownExploit(packet: capture.PacketInfo, conn_state: ?*const Connection
     }
     
     return false;
+}
+
+/// Trigger external vulnerability scan when critical threats detected
+fn triggerVulnerabilityScan(alert: Alert, packet: capture.PacketInfo) !void {
+    // Scanning only on Critical or High severity alerts
+    if (alert.severity != .Critical and alert.severity != .High) {
+        return;
+    }
+
+    // Build scan request
+    const scan_request = .{
+        .target_ip = packet.source_ip,
+        .ports = inferSuspiciousPorts(alert, packet),
+        .reason = alert.message,
+        .severity = alert.severity,
+        .attack_type = inferAttackType(alert),
+        .payload_sample = if (packet.payload) |p| p[0..@min(256, p.len)] else null,
+    };
+
+    // TODO: Send to Shrykull via IPC when implemented
+    _ = scan_request; // suppress unused variable warning for now
+
+    // For now, just log that we would trigger a scan
+    std.log.info("Would trigger vulnerability scan for {s} alert from {d}.{d}.{d}.{d}", 
+        .{@tagName(alert.severity), packet.source_ip[0], packet.source_ip[1], 
+          packet.source_ip[2], packet.source_ip[3]});
+}
+
+/// Infer which ports should be scanned based on the alert
+fn inferSuspiciousPorts(alert: Alert, packet: capture.PacketInfo) []const u16 {
+    _ = alert; // unused for now
+
+    // return the port involved in the alert
+    const ports = [_]u16{packet.dest_port};
+    return &ports;
+}
+
+/// Infer the type of attack from the alert
+fn inferAttackType(alert: Alert) []const u8 {
+    return alert.category;
 }
 
 /// Global tracker for port scanning activities across all connections
