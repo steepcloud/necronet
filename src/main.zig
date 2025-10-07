@@ -4,12 +4,73 @@ const detection = @import("detection");
 const parser = @import("parser");
 const common = @import("common");
 const ipc = @import("ipc");
+const shrykull = @import("shrykull_manager");
 
 var enable_gui = true;
 
 // init alert counters
 var total_packets: u32 = 0;
 var alert_count: u32 = 0;
+
+const CLIOptions = struct {
+    enable_ui: bool = true,
+    enable_scanner: bool = false,
+    scanner_path: []const u8 = "./shrykull",
+    auto_scan_critical: bool = true,
+    auto_scan_high: bool = false,
+    show_help: bool = false,
+};
+
+fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !CLIOptions {
+    _ = allocator;
+    var options = CLIOptions{};
+    
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--no-gui")) {
+            options.enable_ui = false;
+        } else if (std.mem.eql(u8, arg, "--enable-scanner")) {
+            options.enable_scanner = true;
+        } else if (std.mem.startsWith(u8, arg, "--scanner-path=")) {
+            options.scanner_path = arg["--scanner-path=".len..];
+        } else if (std.mem.eql(u8, arg, "--auto-scan-critical")) {
+            options.auto_scan_critical = true;
+        } else if (std.mem.eql(u8, arg, "--no-auto-scan-critical")) {
+            options.auto_scan_critical = false;
+        } else if (std.mem.eql(u8, arg, "--auto-scan-high")) {
+            options.auto_scan_high = true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            options.show_help = true;
+        } else {
+            std.debug.print("Unknown option: {s}\n", .{arg});
+            options.show_help = true;
+        }
+    }
+    
+    return options;
+}
+
+fn printHelp() void {
+    std.debug.print(
+        \\Necronet - Oddworld-themed Network Security Monitor
+        \\
+        \\Usage: necronet [options]
+        \\
+        \\Options:
+        \\  --no-gui                    Run in CLI mode without GUI
+        \\  --enable-scanner            Enable Shrykull vulnerability scanner
+        \\  --scanner-path=<path>       Path to Shrykull executable (default: ./shrykull)
+        \\  --auto-scan-critical        Auto-scan on Critical alerts (default: true)
+        \\  --no-auto-scan-critical     Disable auto-scan on Critical alerts
+        \\  --auto-scan-high            Auto-scan on High alerts (default: false)
+        \\  --help, -h                  Show this help message
+        \\
+        \\Examples:
+        \\  necronet --no-gui
+        \\  necronet --enable-scanner --scanner-path=/usr/local/bin/shrykull
+        \\  necronet --enable-scanner --auto-scan-high
+        \\
+    , .{});
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -19,20 +80,41 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // skipping first argument (executable name)
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--no-gui")) {
-            enable_gui = false;
-            std.debug.print("GUI disabled, running in CLI mode\n", .{});
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            std.debug.print("Necronet - Oddworld-themed Network Security Monitor\n\n", .{});
-            std.debug.print("Usage: necronet [options]\n\n", .{});
-            std.debug.print("Options:\n", .{});
-            std.debug.print("  --no-gui     Run in CLI mode without GUI\n", .{});
-            std.debug.print("  --help, -h   Show this help message\n", .{});
-            return;
+    // Parse command-line arguments
+    const options = try parseArgs(allocator, args);
+
+    if (options.show_help) {
+        printHelp();
+        return;
+    }
+
+    enable_gui = options.enable_ui;
+
+    if (!enable_gui) {
+        std.debug.print("GUI disabled, running in CLI mode\n", .{});
+    }
+
+    var shrykull_manager: ?*shrykull.ShrykullManager = null;
+    if (options.enable_scanner) {
+        std.debug.print("Initializing Shrykull vulnerability scanner...\n", .{});
+        shrykull_manager = try shrykull.ShrykullManager.init(
+            allocator,
+            options.scanner_path
+        );
+        errdefer if (shrykull_manager) |mgr| mgr.deinit();
+        
+        try shrykull_manager.?.start();
+        std.debug.print("✓ Shrykull scanner enabled at: {s}\n", .{options.scanner_path});
+        
+        if (options.auto_scan_critical) {
+            std.debug.print("✓ Auto-scan enabled for Critical alerts\n", .{});
+        }
+        if (options.auto_scan_high) {
+            std.debug.print("✓ Auto-scan enabled for High alerts\n", .{});
         }
     }
+    defer if (shrykull_manager) |mgr| mgr.deinit();
+
     // List available interfaces
     const interfaces = try capture.getInterfaces(allocator);
     defer {
@@ -114,7 +196,7 @@ pub fn main() !void {
     try session.setFilter(filter);
 
     // init detection engine
-    var engine = try detection.DetectionEngine.init(allocator);
+    var engine = try detection.DetectionEngine.init(allocator, shrykull_manager);
     defer engine.deinit();
 
     // init IPC for GUI communication
@@ -214,6 +296,9 @@ pub fn main() !void {
                 if (total_packets % 100 == 0) {
                     std.debug.print("\n--- Stats: {d} packets processed, {d} alerts generated ---\n\n", 
                         .{total_packets, alert_count});
+
+                    // Poll for Shrykull scan results
+                    pollScanResults(shrykull_manager, allocator);
                 }
             }
 
@@ -408,4 +493,27 @@ fn getFlowId(packet: capture.PacketInfo) u64 {
     std.hash.autoHash(&hasher, @intFromEnum(packet.protocol));
     
     return hasher.final();
+}
+
+fn pollScanResults(shrykull_mgr: ?*@TypeOf(@import("shrykull_manager")).ShrykullManager, allocator: std.mem.Allocator) void {
+    if (shrykull_mgr == null) return;
+    
+    while (shrykull_mgr.?.receiveScanResult() catch null) |result| {
+        defer {
+            var mut_result = result;
+            mut_result.deinit(allocator);
+        }
+        
+        std.debug.print("\n╔═══════════════════════════════════════════════════════╗\n", .{});
+        std.debug.print("║ 🔍 SHRYKULL SCAN RESULTS                            ║\n", .{});
+        std.debug.print("╠═══════════════════════════════════════════════════════╣\n", .{});
+        std.debug.print("║ Target: {s:<45} ║\n", .{result.target});
+        std.debug.print("║ Status: {s:<45} ║\n", .{result.status});
+        std.debug.print("║ Duration: {d:.2}s{s: <39} ║\n", .{result.scan_duration, ""});
+        std.debug.print("╠═══════════════════════════════════════════════════════╣\n", .{});
+        std.debug.print("║ Open Ports: {d:<41} ║\n", .{result.summary.open_ports});
+        std.debug.print("║ Vulnerabilities: {d:<36} ║\n", .{result.summary.vulnerabilities_found});
+        std.debug.print("║ Risk Score: {d:.1}/10.0{s: <33} ║\n", .{result.summary.risk_score, ""});
+        std.debug.print("╚═══════════════════════════════════════════════════════╝\n\n", .{});
+    }
 }

@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const src_main_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+    });
+    src_main_module.addIncludePath(b.path("."));
+
     const backend_module = b.createModule(.{
         .root_source_file = b.path("backend/capture.zig"),
     });
@@ -63,6 +68,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("ui/visualizer.zig"),
     });
 
+    src_main_module.addImport("shrykull_manager", backend_shrykull_module);
+    src_main_module.addImport("backend", backend_module);
+    src_main_module.addImport("detection", detection_module);
+    src_main_module.addImport("ipc", ipc_module);
+    src_main_module.addImport("common", common_module);
+    src_main_module.addImport("parser", parser_module);
     backend_module.addImport("common", common_module);
     detection_module.addImport("common", common_module);
     detection_module.addImport("backend", backend_module);
@@ -104,6 +115,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // add modules to the main executable
+    exe.root_module.addImport("main", src_main_module);
     exe.root_module.addImport("backend", backend_module);
     exe.root_module.addImport("detection", detection_module);
     exe.root_module.addImport("shrykull_manager", backend_shrykull_module);
